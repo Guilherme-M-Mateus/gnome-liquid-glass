@@ -107,6 +107,9 @@ export const LiquidEffect = GObject.registerClass({
   declare private _animBaseMaxZ: number | undefined;
   declare private _animBaseChroma: number | undefined;
   declare private _lastAnimationScale: number | undefined;
+  // Last radius pushed by setCornerRadius, so the per-frame calls from the
+  // popup managers can skip an unchanged value.
+  declare private _lastCornerRadius: number | undefined;
   declare private _settingsIds: number[];
   declare private _logger: Logger | undefined;
 
@@ -134,6 +137,9 @@ export const LiquidEffect = GObject.registerClass({
   // ── Active blur method (0: Gaussian, 1: Dual Kawase) ──
   declare private _blurMethod: BlurMethod;
 
+  // ── Rendering quality preset (0 = Quality, 1 = Balanced, 2 = Performance) ──
+  declare private _qualityLevel: number;
+
   // ── State for dynamic Gaussian shader generation ──
   // The kernel currently compiled into the H/V pipelines (its tap count
   // determines the shader's structure).
@@ -154,8 +160,14 @@ export const LiquidEffect = GObject.registerClass({
   // ── Uniform location cache for the composite pipeline ──
   declare private _compUniforms: Map<string, number>;
 
+  // ── Uniform location caches for the blur pipelines ──
+  declare private _pipelineUniforms: WeakMap<Cogl.Pipeline, Map<string, number>>;
+
   // ── Uniforms set before the pipeline existed, applied once it's created ──
   declare private _pendingUniforms: Map<string, number>;
+  // True while _pendingUniforms holds values not yet uploaded to the composite
+  // pipeline. Only set before the pipeline exists; see _applyPendingUniforms().
+  declare private _uniformsDirty: boolean;
 
   // ── Crop texture pool ──
   // Some Cogl/Clutter versions return a get_texture() whose size is larger
@@ -212,7 +224,9 @@ export const LiquidEffect = GObject.registerClass({
     this._gaussianVPipeline = null;
     this._compositePipeline = null;
     this._compUniforms = new Map();
+    this._pipelineUniforms = new WeakMap();
     this._pendingUniforms = new Map();
+    this._uniformsDirty = true;
     this._poolWidth = 0;
     this._poolHeight = 0;
     this._cropTexture = null;
@@ -224,6 +238,7 @@ export const LiquidEffect = GObject.registerClass({
     this._blurRadiusDown = 0.5;
     this._blurRadiusUp = 1.0;
     this._blurMethod = 1; // default: Dual Kawase
+    this._qualityLevel = 0; // default: Quality — unchanged rendering
     this._targetRadius = 15.0;
 
     this._gaussianKernel = null;
@@ -268,6 +283,9 @@ export const LiquidEffect = GObject.registerClass({
     // default only matters before the first sync.
     this._setFloat('shadow_max_radius', 180.0);
     this._setFloat('isDock', 0.0);
+    // Quality preset, pushed explicitly so the uniform is defined even when the
+    // level never changes from its default (setQualityLevel early-returns then).
+    this._setFloat('quality_level', 0.0);
 
     // Full-screen FBO mode: lets the shader know where the dock sits.
     this._setFloat('dock_x', 0.0);
@@ -385,7 +403,16 @@ export const LiquidEffect = GObject.registerClass({
 
     // ── Composite pipeline (glass.frag) ──────────────────────────────────────
     this._compositePipeline = Cogl.Pipeline.new(ctx);
+    // Both sampler layers are configured once here rather than on every paint.
+    // Wrap mode and filters are pipeline state that Cogl hashes to key its
+    // program cache; re-setting them each frame to the values they already hold
+    // is pure churn. Only the layer *textures* change per frame, and those are
+    // still bound in vfunc_paint_target.
     this._configureSamplerLayer(this._compositePipeline, 0);
+    this._configureSamplerLayer(this._compositePipeline, 1);
+
+    // Values buffered before this point still need their first upload.
+    this._uniformsDirty = true;
 
     // Standard premultiplied-alpha blending, equivalent to ShaderEffect's default:
     // "src.rgb + dst.rgb * (1 - src.a)"
@@ -587,6 +614,12 @@ export const LiquidEffect = GObject.registerClass({
     let pw = Math.max(w >> 1, 1);
     let ph = Math.max(h >> 1, 1);
 
+    // The horizontal-pass scratch buffers are only read by _runGaussianBlur().
+    // Allocating them under Dual Kawase wasted a full parallel pyramid of
+    // textures + FBOs per surface — at monitor resolution that is real VRAM,
+    // multiplied by every glass surface on screen.
+    const needsGaussianTemp = this._blurMethod === 0;
+
     for (let i = 0; i < this.PASS_COUNT; i++) {
       try {
         // Main buffer, shared by Dual Kawase and Gaussian.
@@ -595,11 +628,13 @@ export const LiquidEffect = GObject.registerClass({
         this._blurTextures.push(tex);
         this._blurFbos.push(fbo);
 
-        // Intermediate buffer for the Gaussian horizontal pass (same resolution).
-        const tmpTex = Cogl.Texture2D.new_with_size(ctx, pw, ph);
-        const tmpFbo = Cogl.Offscreen.new_with_texture(tmpTex);
-        this._gaussianTempTextures.push(tmpTex);
-        this._gaussianTempFbos.push(tmpFbo);
+        if (needsGaussianTemp) {
+          // Intermediate buffer for the Gaussian horizontal pass (same resolution).
+          const tmpTex = Cogl.Texture2D.new_with_size(ctx, pw, ph);
+          const tmpFbo = Cogl.Offscreen.new_with_texture(tmpTex);
+          this._gaussianTempTextures.push(tmpTex);
+          this._gaussianTempFbos.push(tmpFbo);
+        }
       } catch (e) {
         this._logger?.error(`[Liquid Glass] Failed to build texture pool at pass ${i} (${pw}x${ph}): ${e}`);
         this._destroyTexturePool();
@@ -688,6 +723,11 @@ export const LiquidEffect = GObject.registerClass({
    * _blurTextures[0].
    */
   private _runGaussianBlur(srcTex: Cogl.Texture): void {
+    // The scratch buffers only exist when the pool was built for this method.
+    // setBlurMethod() drops the pool on every switch so it gets rebuilt with
+    // them, but bail rather than throw if a paint ever lands in between.
+    if (!this._gaussianTempFbos.length || !this._blurFbos.length) return;
+
     const tempFbo = this._gaussianTempFbos[0] as unknown as CoglFB;
     const tempTex = this._gaussianTempTextures[0];
     const destFbo = this._blurFbos[0] as unknown as CoglFB;
@@ -1030,11 +1070,12 @@ export const LiquidEffect = GObject.registerClass({
     const compFb = paintContext.get_framebuffer();
     const compPipeline = this._compositePipeline!;
 
-    // Layer 0: the sharp, unblurred capture (used as the basis for refraction).
-    // Using the cropped texture means UV (0,0)-(1,1) lines up exactly with
-    // the actor's logical size.
+    // Layer 0: the sharp, unblurred capture. glass.frag does not currently
+    // sample it — it reads everything through cogl_sampler1 — but the layer is
+    // kept bound so the shader's declared sampler set matches the pipeline's
+    // layer set. Sampler state for both layers is configured once in
+    // _initPipelines(); only the texture changes here.
     compPipeline.set_layer_texture(0, effectiveTex);
-    this._configureSamplerLayer(compPipeline, 0);
 
     // Layer 1: the heavily blurred texture (used for the background blur).
     // Falls back to effectiveTex when no blur pass ran.
@@ -1043,11 +1084,9 @@ export const LiquidEffect = GObject.registerClass({
     } else {
       compPipeline.set_layer_texture(1, effectiveTex);
     }
-    this._configureSamplerLayer(compPipeline, 1);
 
-    // Manually sync pending uniforms into the composite pipeline.
-    // Without this, values like dock_x would stay at 0 and the whole screen
-    // would be misdetected as being inside the dock mask.
+    // Upload any uniforms buffered before the pipeline existed. After the first
+    // paint this is a single boolean test — see _applyPendingUniforms().
     this._applyPendingUniforms();
 
     compFb.push_matrix();
@@ -1064,15 +1103,39 @@ export const LiquidEffect = GObject.registerClass({
   // ─── Uniform helpers ─────────────────────────────────────────────────────────
 
   /**
-   * Sets a vec2 uniform on a pipeline. Cogl caches the uniform location
-   * internally, so calling this every frame is safe.
+   * Resolves a uniform location, memoized per pipeline.
+   *
+   * get_uniform_location() is a string-keyed lookup into Cogl's global uniform
+   * name table. Not expensive in isolation, but the blur inner loops call it
+   * twice per pass — up to 14 times per frame per surface — for names that
+   * never change. The composite path has always cached its locations
+   * (_compUniforms); this gives the blur pipelines the same treatment.
+   *
+   * Keyed weakly so a discarded pipeline (the Gaussian ones are rebuilt
+   * whenever the tap count changes) doesn't pin its cache.
+   */
+  private _uniformLocation(pipeline: Cogl.Pipeline, name: string): number {
+    let cache = this._pipelineUniforms.get(pipeline);
+    if (cache === undefined) {
+      cache = new Map<string, number>();
+      this._pipelineUniforms.set(pipeline, cache);
+    }
+    let loc = cache.get(name);
+    if (loc === undefined) {
+      loc = pipeline.get_uniform_location(name);
+      cache.set(name, loc);
+    }
+    return loc;
+  }
+
+  /**
+   * Sets a vec2 uniform on a pipeline.
    */
   private _setPipelineVec2(
     pipeline: Cogl.Pipeline, name: string, x: number, y: number
   ): void {
-    const loc = pipeline.get_uniform_location(name);
     // set_uniform_float(loc, n_components, count, values[])
-    pipeline.set_uniform_float(loc, 2, 1, [x, y]);
+    pipeline.set_uniform_float(this._uniformLocation(pipeline, name), 2, 1, [x, y]);
   }
 
   /**
@@ -1081,8 +1144,7 @@ export const LiquidEffect = GObject.registerClass({
   private _setPipelineFloat(
     pipeline: Cogl.Pipeline, name: string, value: number
   ): void {
-    const loc = pipeline.get_uniform_location(name);
-    pipeline.set_uniform_float(loc, 1, 1, [value]);
+    pipeline.set_uniform_float(this._uniformLocation(pipeline, name), 1, 1, [value]);
   }
 
   /**
@@ -1094,6 +1156,10 @@ export const LiquidEffect = GObject.registerClass({
     this._pendingUniforms.set(name, value);
     if (this._compositePipeline) {
       this._applyUniform(name, value);
+    } else {
+      // No pipeline yet, so this value only lives in _pendingUniforms. Mark it
+      // so the first paint after pipeline creation uploads it.
+      this._uniformsDirty = true;
     }
   }
 
@@ -1110,10 +1176,23 @@ export const LiquidEffect = GObject.registerClass({
     this._compositePipeline.set_uniform_float(loc, 1, 1, [value]);
   }
 
+  /**
+   * Uploads any uniform values that were buffered before the composite pipeline
+   * existed.
+   *
+   * This used to replay the entire ~40-entry map on every single paint, which
+   * was redundant: _setFloat() already uploads eagerly whenever the pipeline is
+   * available, so the only values that can be stale are those set during
+   * construction — before _initPipelines() runs on the first paint. After that
+   * first upload there is nothing to do, so the common case is now a single
+   * boolean test instead of 40 set_uniform_float() calls per surface per frame.
+   */
   private _applyPendingUniforms(): void {
+    if (!this._uniformsDirty) return;
     for (const [name, value] of this._pendingUniforms) {
       this._applyUniform(name, value);
     }
+    this._uniformsDirty = false;
   }
 
   // ─── Cogl context lookup ─────────────────────────────────────────────────────
@@ -1182,6 +1261,14 @@ export const LiquidEffect = GObject.registerClass({
     const blurMethodId = settings.connect('changed::blur-method', applyBlurMethod);
     this._settingsIds.push(blurMethodId);
 
+    // Rendering quality preset. Applied before the first paint so the initial
+    // kernel is already built for the selected level.
+    const applyQualityLevel = () => {
+      this.setQualityLevel(settings.get_int('quality-level'));
+    };
+    applyQualityLevel();
+    const qualityLevelId = settings.connect('changed::quality-level', applyQualityLevel);
+    this._settingsIds.push(qualityLevelId);
   }
 
   // ─── Public API (compatible with the previous ShaderEffect-based interface) ──
@@ -1285,6 +1372,15 @@ export const LiquidEffect = GObject.registerClass({
   }
 
   setCornerRadius(radius: number): void {
+    // Called once per frame from the popup managers' geometry sync, which
+    // recompute the radius from the menu's animation scale. While a menu sits
+    // open at rest that value is identical every frame, so an unguarded
+    // queue_repaint() here forced a full repaint of the offscreen effect on
+    // every frame of an idle popup. setAnimationScale() below already guards
+    // itself the same way for the same reason.
+    if (this._lastCornerRadius === radius) return;
+    this._lastCornerRadius = radius;
+
     this._setFloat('corner_radius', radius);
     this.queue_repaint();
   }
@@ -1342,6 +1438,25 @@ export const LiquidEffect = GObject.registerClass({
   }
 
   /**
+   * Sets the size the shader's optical constants are normalized against.
+   *
+   * Refraction depth, chromatic aberration width and the surface-normal
+   * sampling step are all divided by the render target's smaller dimension.
+   * That makes them depend on how big a buffer the surface happens to render
+   * into — so shrinking the buffer, which is purely an optimization, would
+   * otherwise change how the glass looks.
+   *
+   * Callers that narrow their render target pass the size they used to render
+   * into here, which keeps the appearance fixed while the buffer shrinks.
+   * Leave it unset (or pass the render target's own size) for no change.
+   */
+  setReferenceResolution(width: number, height: number): void {
+    this._setFloat('ref_resolution_x', width);
+    this._setFloat('ref_resolution_y', height);
+    this.queue_repaint();
+  }
+
+  /**
    * Full-screen FBO mode: passes the dock's monitor-relative geometry to the
    * shader (see the dock_x/y/w/h comments in glass.frag for details).
    */
@@ -1377,13 +1492,43 @@ export const LiquidEffect = GObject.registerClass({
    * first frame. The Gaussian pipelines are built dynamically: setBlurRadius()
    * computes the kernel for the current radius, and it's lazily compiled on
    * the next vfunc_paint_target only if needed.
-   * The texture pool is shared between both methods (see _buildTexturePool),
-   * so no manual rebuild is required when switching — queue_repaint() alone
-   * is enough for the new method to take effect on the next frame.
+   * The pool's *contents* differ by method: _buildTexturePool only allocates
+   * the Gaussian horizontal-pass scratch buffers when the Gaussian method is
+   * active, so the pool must be discarded here and rebuilt on the next paint.
+   * The radius setters below also drop the pool whenever PASS_COUNT changes,
+   * which covers most transitions — but not all of them (Dual Kawase at a
+   * radius small enough to use a single pass already has PASS_COUNT === 1, so
+   * switching from it to Gaussian would leave the count unchanged and keep a
+   * pool with no scratch buffers). Dropping it unconditionally here removes
+   * that dependency on which radius happened to be set.
    */
+  /**
+   * Selects the rendering quality preset: 0 = Quality, 1 = Balanced,
+   * 2 = Performance.
+   *
+   * Level 0 is the default and renders identically to the extension before the
+   * preset existed — nothing is capped and no approximation is enabled. Higher
+   * levels trade fidelity for GPU time, and only ever apply because the user
+   * asked for them.
+   */
+  setQualityLevel(level: number): void {
+    const clamped = Math.max(0, Math.min(2, Math.round(level)));
+    if (this._qualityLevel === clamped) return;
+    this._qualityLevel = clamped;
+
+    // Read by the composite shader to gate its own approximations.
+    this._setFloat('quality_level', clamped);
+
+    // The sigma ceiling changes with the level, so the kernel has to be
+    // recomputed from the radius the caller last asked for.
+    this.setBlurRadius(this._targetRadius);
+    this.queue_repaint();
+  }
+
   setBlurMethod(method: BlurMethod): void {
     if (this._blurMethod === method) return;
     this._blurMethod = method;
+    this._destroyTexturePool();
     this.setBlurRadius(this._targetRadius);
     this.queue_repaint();
   }
@@ -1431,7 +1576,16 @@ export const LiquidEffect = GObject.registerClass({
    */
   private _setGaussianBlurRadius(radius: number): void {
     const RES_SCALE = 2.0;        // half resolution: 1 texel = 2 original pixels
-    const MAX_SIGMA_TEXEL = 15.0; // physical cap of 30px (= 15 texels in half-res space)
+
+    // Sigma sets the tap count directly (fetches = 1 + 2*ceil(ceil(sigma*4)/2)),
+    // so the ceiling here is the main lever the quality preset has over blur
+    // cost: at the slider maximum, Quality issues 61 texture fetches per
+    // fragment per pass across two passes, Balanced 33 and Performance 17.
+    // Level 0 keeps the original 15-texel (30px) cap, so its output is
+    // unchanged.
+    const MAX_SIGMA_BY_QUALITY = [15.0, 8.0, 4.0];
+    const MAX_SIGMA_TEXEL =
+      MAX_SIGMA_BY_QUALITY[Math.max(0, Math.min(2, this._qualityLevel))];
 
     // ── Minimum sigma guarantee ────────────────────────────────────────────
     // Downsampling to half resolution (bilinear 2x) is effectively a 2px-wide

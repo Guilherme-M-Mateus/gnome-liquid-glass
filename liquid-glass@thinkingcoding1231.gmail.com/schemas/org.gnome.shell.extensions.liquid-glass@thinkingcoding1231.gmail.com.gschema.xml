@@ -221,6 +221,12 @@
       <description>0 = Gaussian Blur (Recommended), 1 = Dual Kawase (Performance)</description>
     </key>
 
+    <key name="quality-level" type="i">
+      <default>0</default>
+      <summary>Rendering quality</summary>
+      <description>0 = Quality (default, unchanged rendering), 1 = Balanced, 2 = Performance. Levels above 0 cap the blur kernel and simplify the glass shader in exchange for GPU time.</description>
+    </key>
+
     <key name="glass-max-z" type="d">
       <default>25.0</default>
       <summary>Maximum Z depth (Thickness)</summary>

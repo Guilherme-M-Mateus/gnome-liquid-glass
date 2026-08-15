@@ -17,6 +17,16 @@ export class Logger {
             this._outputLogs = this._settings.get_boolean('output-logs');
         });
     }
+    /**
+     * Whether anything logged would actually be printed.
+     *
+     * The methods below already drop everything when logging is off, but the
+     * caller has still paid to build the message. Hot paths that interpolate
+     * strings (or walk a collection to describe it) should test this first.
+     */
+    get enabled() {
+        return this._outputLogs;
+    }
     log(...args) {
         if (!this._outputLogs)
             return;

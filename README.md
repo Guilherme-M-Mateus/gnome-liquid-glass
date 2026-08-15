@@ -109,6 +109,34 @@ npm run dev
 - [ ] Add Perfect Antialiasing
 - [ ] Publish to extensions.gnome.org
 
+## ⚡ Performance
+
+The glass is drawn by a fragment shader that runs over a render target, so the
+two things that decide its cost are how many pixels that target has and how many
+texture fetches each one does.
+
+- **Render targets are sized to the surface.** Each surface renders into a box
+  around itself plus the reach of its blur and drop shadow, rather than the whole
+  monitor. The blur chain and the composite pass both cover the entire target, so
+  for something like a Quick Settings popup this is the bulk of its per-frame
+  cost.
+- **The composite shader skips fragments that cannot contribute.** Outside the
+  glass and its shadow the result was already fully transparent, but the shader
+  was still doing 12 texture fetches and the whole lighting chain to arrive
+  there.
+- **Rendering Quality** (Glass → Physical & Optical Properties) trades fidelity
+  for GPU time. **Quality** is the default and renders exactly as before this
+  setting existed. **Balanced** and **Performance** cap the blur kernel and let
+  the shader collapse the chromatic-aberration taps when they are too narrow to
+  resolve.
+
+If you want to measure it, turn on **Output Logs** (Glass → Debug) and watch the
+journal: the extension reports frame-time percentiles every five seconds.
+
+```bash
+journalctl -f -o cat /usr/bin/gnome-shell | grep 'Liquid Glass.*frame ms'
+```
+
 ## ⚠️ Settings changes
 
 Two rounds of cleanup changed the settings layout. Export your settings first
@@ -125,3 +153,6 @@ Two rounds of cleanup changed the settings layout. Export your settings first
   of — the two animations were compounding, which is why popups appeared to
   inflate and wobble. The `*-spring-*`, `*-animation-interval-ms` and
   `enable-*-animation` keys have been removed along with it.
+- **`quality-level` was added**, defaulting to `0` (Quality). It is additive and
+  its default reproduces the previous rendering exactly, so upgrading needs no
+  migration and nothing to re-tune.

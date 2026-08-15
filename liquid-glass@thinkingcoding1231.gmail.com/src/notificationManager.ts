@@ -5,7 +5,7 @@ import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import { LiquidEffect } from './liquidEffect.js';
-import { GlassLayer } from './glassSurface.js';
+import { GlassLayer, tightFbo } from './glassSurface.js';
 import { AdaptiveTextController, AdaptiveGroup, findTextActors } from './adaptiveText.js';
 import Gio from 'gi://Gio';
 import {
@@ -61,6 +61,16 @@ export class NotificationManager {
 
   private _lastScreenW: number | undefined;
   private _lastScreenH: number | undefined;
+
+  // The render target: a box around the banner rather than the whole monitor.
+  private _lastFboX: number | undefined;
+  private _lastFboY: number | undefined;
+  private _lastFboW: number | undefined;
+  private _lastFboH: number | undefined;
+
+  // Sized inputs to the render target; refreshed from their 'changed::'.
+  private _blurRadius: number = 0;
+  private _shadowRadius: number = 0;
 
   private _adaptiveText: AdaptiveTextController | null = null;
 
@@ -129,14 +139,23 @@ export class NotificationManager {
     connectSetting('popup-tint-strength', () => {
       if (this.effect && this._isEffectActive) {
         this._baseTint = this._settings.get_double('popup-tint-strength');
+    this._blurRadius = this._settings.get_int('popup-blur-radius');
+    this._shadowRadius = this._settings.get_double('shadow-radius');
         this._currentTint = this._baseTint;
         this.effect.setTintStrength(this._baseTint);
       }
     });
 
+    connectSetting('shadow-radius', () => {
+      // Not a popup-prefixed key, but the shadow's decay distance helps size
+      // the render target, so it is tracked here too.
+      this._shadowRadius = this._settings.get_double('shadow-radius');
+    });
+
     connectSetting('popup-blur-radius', () => {
+      this._blurRadius = this._settings.get_int('popup-blur-radius');
       if (this.effect && this._isEffectActive) {
-        this.effect.setBlurRadius(this._settings.get_int('popup-blur-radius'));
+        this.effect.setBlurRadius(this._blurRadius);
       }
     });
 
@@ -363,48 +382,61 @@ export class NotificationManager {
     let localBgX = bgX_abs - monitorX;
     let localBgY = bgY_abs - monitorY;
 
+    // A banner is a small box near the top of the screen, so rendering it into
+    // a monitor-sized target meant running the blur chain and the composite
+    // pass over the whole display for it. Narrow the target to the banner plus
+    // the reach of the blur and shadow.
+    const fbo = tightFbo({ x: bgX_abs, y: bgY_abs, width: bgW, height: bgH },
+      { x: monitorX, y: monitorY, width: screenW, height: screenH },
+      this._blurRadius, this._shadowRadius);
+
     // ── Update actors only when geometry actually changed ────────────────────
     if (this._lastBgW !== bgW || this._lastBgH !== bgH ||
       this._lastBgX !== bgX_abs || this._lastBgY !== bgY_abs ||
-      this._lastScreenW !== screenW || this._lastScreenH !== screenH) {
+      this._lastScreenW !== screenW || this._lastScreenH !== screenH ||
+      this._lastFboX !== fbo.x || this._lastFboY !== fbo.y ||
+      this._lastFboW !== fbo.width || this._lastFboH !== fbo.height) {
 
-      // bgActor: full monitor size, positioned at monitor origin
+      // bgActor: the render target, at its own origin
       this.bgActor.remove_transition('size');
       this.bgActor.remove_transition('position');
-      this.bgActor.set_position(monitorX, monitorY);
-      this.bgActor.set_size(screenW, screenH);
+      this.bgActor.set_position(fbo.x, fbo.y);
+      this.bgActor.set_size(fbo.width, fbo.height);
       this.bgActor.remove_transition('size');
       this.bgActor.remove_transition('position');
 
       // liquidBox fills the entire bgActor
       this.liquidBox?.set_position(0, 0);
-      this.liquidBox?.set_size(screenW, screenH);
+      this.liquidBox?.set_size(fbo.width, fbo.height);
 
-      // Soft clip — limits GPU work to the notification area + generous margin
-      const CLIP_PADDING = 200;
+      // No soft clip: the target is already bounded to the region that can
+      // contribute, and liquidBox clips to its allocation.
       this.liquidBox?.remove_clip();
-      this.bgActor.set_clip(
-        localBgX - CLIP_PADDING, localBgY - CLIP_PADDING,
-        bgW + CLIP_PADDING * 2, bgH + CLIP_PADDING * 2
-      );
+      this.bgActor.remove_clip();
 
-      const SHADOW_MAX_RADIUS = CLIP_PADDING - 20;
+      const SHADOW_MAX_RADIUS = 180;
       this.effect?.setShadowMaxRadius(SHADOW_MAX_RADIUS);
 
-      // Inform the shader of the full-screen resolution and where the
-      // notification lives within the FBO (mirrors dockManager.setGlassGeometry)
-      this.effect?.setResolution(screenW, screenH);
-      this.effect?.setGlassGeometry(localBgX, localBgY, bgW, bgH);
+      // Resolution follows the target; the optical constants stay pinned to the
+      // monitor size, so narrowing the target does not change the look.
+      this.effect?.setResolution(fbo.width, fbo.height);
+      this.effect?.setReferenceResolution(screenW, screenH);
+      this.effect?.setGlassGeometry(bgX_abs - fbo.x, bgY_abs - fbo.y, bgW, bgH);
 
       this._lastBgW = bgW; this._lastBgH = bgH;
       this._lastBgX = bgX_abs; this._lastBgY = bgY_abs;
       this._lastScreenW = screenW; this._lastScreenH = screenH;
+      this._lastFboX = fbo.x; this._lastFboY = fbo.y;
+      this._lastFboW = fbo.width; this._lastFboH = fbo.height;
     }
 
     // ── Sync clones every frame (dockManager pattern) ────────────────────────
-    this._windowCloneManager?.setOffset(-monitorX, -monitorY);
-    this._uiSampler?.refresh();
-    this._uiSampler?.sync(monitorX, monitorY, screenW, screenH);
+    // Clones are positioned relative to the render target's origin.
+    this._windowCloneManager?.setOffset(-fbo.x, -fbo.y);
+    // Only rescans when uiGroup's children or their visibility actually
+    // changed; see UILayerSampler.refreshIfDirty().
+    this._uiSampler?.refreshIfDirty();
+    this._uiSampler?.sync(fbo.x, fbo.y, fbo.width, fbo.height);
     this._windowCloneManager?.sync();
   }
 

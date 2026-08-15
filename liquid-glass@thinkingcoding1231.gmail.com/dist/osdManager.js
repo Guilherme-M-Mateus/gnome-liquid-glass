@@ -1,9 +1,7 @@
 // src/osdManager.ts
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import St from 'gi://St';
-import GLib from 'gi://GLib';
-import Meta from 'gi://Meta';
-import { GlassLayer } from './glassSurface.js';
+import { GlassLayer, FrameLoop, SHADER_PADDING, tightFbo } from './glassSurface.js';
 import { AdaptiveTextController, findTextActors } from './adaptiveText.js';
 // ========== Configuration Parameters (Defaults, overridden by settings) ==========
 export class OsdManager {
@@ -11,12 +9,15 @@ export class OsdManager {
     _settings;
     _logger;
     _settingsSignals;
-    _frameSyncId;
+    _frameLoop;
     _isEffectActive;
     _osdYOffset;
     _osdStates;
     _baseTint;
     _glassExpand;
+    // Read per frame to size the render target; refreshed from 'changed::'.
+    _blurRadius = 0;
+    _shadowRadius = 0;
     _monitorsChangedId;
     _adaptiveText = null;
     constructor(extensionPath, settings, logger) {
@@ -25,7 +26,7 @@ export class OsdManager {
         this._logger = logger;
         this._osdStates = [];
         this._settingsSignals = [];
-        this._frameSyncId = 0;
+        this._frameLoop = null;
         this._monitorsChangedId = 0;
         this._isEffectActive = false;
         this._glassExpand = 12;
@@ -78,12 +79,18 @@ export class OsdManager {
             }
         });
         connectSetting('popup-blur-radius', () => {
+            let radius = this._settings.get_int('popup-blur-radius');
+            this._blurRadius = radius;
             if (this._isEffectActive) {
-                let radius = this._settings.get_int('popup-blur-radius');
                 for (let state of this._osdStates) {
                     state.layer?.effect.setBlurRadius(radius);
                 }
             }
+        });
+        // Not a popup-prefixed key, but the shadow's decay distance sizes the
+        // render target, so it is tracked here too.
+        connectSetting('shadow-radius', () => {
+            this._shadowRadius = this._settings.get_double('shadow-radius');
         });
         connectSetting('popup-corner-radius', () => {
             if (this._isEffectActive) {
@@ -155,6 +162,8 @@ export class OsdManager {
         this._glassExpand = this._settings.get_int('popup-glass-expand');
         this._baseTint = this._settings.get_double('popup-tint-strength');
         this._osdYOffset = this._settings.get_int('osd-y-offset');
+        this._blurRadius = this._settings.get_int('popup-blur-radius');
+        this._shadowRadius = this._settings.get_double('shadow-radius');
         let osdWindows = Main.osdWindowManager._osdWindows;
         if (!osdWindows)
             return;
@@ -169,19 +178,18 @@ export class OsdManager {
                 continue;
             state.layer.excludeOtherGlassRoots();
         }
-        // Global frame-render loop (covers all OSD states)
-        const frameLaterType = Meta.LaterType.BEFORE_REDRAW;
-        const frameTick = () => {
-            this._frameSyncId = 0;
-            if (!this._isEffectActive)
-                return GLib.SOURCE_REMOVE;
-            for (let state of this._osdStates) {
+        // Global frame-render loop (covers all OSD states).
+        //
+        // Gated on an OSD actually being on screen. It used to run for as long as
+        // the extension was enabled, syncing geometry for every monitor's OSD on
+        // every frame forever — while an OSD is only visible for a second or two
+        // when the user changes volume or brightness. Each state's start/stop is
+        // driven by its 'notify::visible' handler in _setupOsdEffect().
+        this._frameLoop = new FrameLoop(() => {
+            for (let state of this._osdStates)
                 this._syncGeometry(state);
-            }
-            this._frameSyncId = this._laterAdd(frameLaterType, frameTick);
-            return GLib.SOURCE_REMOVE;
-        };
-        this._frameSyncId = this._laterAdd(frameLaterType, frameTick);
+        }, () => this._isEffectActive && this._osdStates.some(s => s.osdWindow?.visible));
+        this._frameLoop.start();
         this._adaptiveText?.start();
         // Rebuild everything if monitor configuration changes
         this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
@@ -250,13 +258,26 @@ export class OsdManager {
             _wasVisible: false,
             _isFirstAdaptiveRun: true,
             _destroyId: 0,
+            _visibleId: 0,
         };
         this._osdStates.push(state);
+        // An OSD is on screen for a couple of seconds at a time, so the frame loop
+        // is driven by visibility rather than left running for the whole session.
+        // GNOME's OsdWindow fades out by easing opacity to 0 and only then calling
+        // hide(), so 'visible' stays true for the duration of the fade and the loop
+        // keeps tracking it right through to the end.
+        state._visibleId = osdWindow.connect('notify::visible', () => {
+            if (osdWindow.visible)
+                this._frameLoop?.start();
+            else
+                this._frameLoop?.stopIfIdle();
+        });
         // When the OSD window itself is destroyed, clean up our matching state
         state._destroyId = osdWindow.connect('destroy', () => {
             this._osdStates = this._osdStates.filter(s => s !== state);
             state.layer?.destroy();
             state.layer = null;
+            this._frameLoop?.stopIfIdle();
         });
     }
     // ── Per-state geometry synchronisation ─────────────────────────────────────
@@ -321,10 +342,26 @@ export class OsdManager {
         let monitor = Main.layoutManager.monitors[monitorIndex] || Main.layoutManager.primaryMonitor;
         if (!monitor)
             return;
+        // An OSD is a small box in the middle of the screen, so rendering it into a
+        // monitor-sized FBO meant blurring the whole display for it. The target is
+        // narrowed to the glass plus the blur and shadow reach; refSize keeps the
+        // shader's optical constants on the monitor size they used to use, so the
+        // appearance is unchanged.
+        // Must match the rect GlassLayer.sync() derives internally, which grows the
+        // visual rect by SHADER_PADDING as well as the expand setting.
+        const grow = SHADER_PADDING + this._glassExpand;
+        const glassRect = {
+            x: visualX - grow,
+            y: visualY - grow,
+            width: visualW + 2 * grow,
+            height: visualH + 2 * grow,
+        };
         state.layer.sync({
             x: visualX, y: visualY, width: visualW, height: visualH,
             monitor,
             expand: this._glassExpand,
+            fbo: tightFbo(glassRect, monitor, this._blurRadius, this._shadowRadius),
+            refSize: monitor,
         });
     }
     // ── Effect remove / cleanup ─────────────────────────────────────────────────
@@ -338,11 +375,8 @@ export class OsdManager {
             Main.layoutManager.disconnect(this._monitorsChangedId);
             this._monitorsChangedId = 0;
         }
-        if (this._frameSyncId !== 0) {
-            if (global.compositor?.get_laters)
-                global.compositor.get_laters().remove(this._frameSyncId);
-            this._frameSyncId = 0;
-        }
+        this._frameLoop?.stop();
+        this._frameLoop = null;
         for (let state of this._osdStates) {
             this._cleanupOsdState(state);
         }
@@ -356,6 +390,14 @@ export class OsdManager {
             }
             catch (e) { }
             state._destroyId = 0;
+        }
+        // Disconnect the visibility watcher that drives the frame loop
+        if (state.osdWindow && state._visibleId) {
+            try {
+                state.osdWindow.disconnect(state._visibleId);
+            }
+            catch (e) { }
+            state._visibleId = 0;
         }
         // Restore target box
         if (state.targetBox) {
@@ -376,9 +418,6 @@ export class OsdManager {
         this._removeEffect();
     }
     // ── Adaptive text colour helpers ────────────────────────────────────────────
-    _laterAdd(laterType, callback) {
-        return global.compositor?.get_laters?.().add(laterType, callback);
-    }
     /** One region per visible OSD; each is a single small box, so no cards. */
     _buildAdaptiveGroups() {
         const groups = [];

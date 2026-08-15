@@ -26,6 +26,57 @@ function laterAdd(cb) {
 }
 /** Extra room around the surface for refraction and blur to spill into. */
 export const SHADER_PADDING = 20;
+/**
+ * Slack beyond the computed reach, absorbing rounding and the shader's own
+ * edge feathering.
+ */
+const FBO_SLACK = 32;
+/**
+ * How far, in full-resolution pixels, the blur gathers from each pixel.
+ *
+ * The separable Gaussian runs at half resolution over a kernel whose half-width
+ * is `ceil(sigma * 4)` half-res texels, with `sigma = min(radius / 2, 15)`.
+ * Converting back to full-resolution pixels gives `min(radius * 4, 120)`.
+ *
+ * This is deliberately larger than the `radius * 2` estimate used elsewhere:
+ * under-padding does not fail loudly, it just darkens the edge of the surface
+ * where the blur starts sampling clamped border texels instead of real content.
+ */
+function blurReachPx(blurRadius) {
+    return Math.min(Math.max(0, blurRadius) * 4, 120);
+}
+/**
+ * Builds the smallest render target that still produces the same picture.
+ *
+ * Sizing every surface's FBO to the whole monitor is by far the most expensive
+ * thing this extension does: the blur chain and the composite pass both run
+ * over the entire target, so a 400x300 popup was blurring 1920x1080 (or worse)
+ * on every frame. The glass only needs the region it covers, plus enough
+ * margin for the two effects that read outside it:
+ *
+ *   * the blur, which gathers up to blurReachPx() away from each pixel;
+ *   * the drop shadow, which decays over shadowRadius.
+ *
+ * Clipped to the monitor, since sampling past the monitor edge yields nothing.
+ *
+ * The caller must also pass `refSize` (normally the monitor) to sync(), or the
+ * shader's optical constants will follow the smaller target and the refraction
+ * will visibly weaken.
+ */
+export function tightFbo(glass, monitor, blurRadius, shadowRadius) {
+    const reach = Math.max(blurReachPx(blurRadius), shadowRadius);
+    const pad = Math.ceil(Math.max(0, reach)) + FBO_SLACK;
+    const left = Math.max(monitor.x, Math.floor(glass.x) - pad);
+    const top = Math.max(monitor.y, Math.floor(glass.y) - pad);
+    const right = Math.min(monitor.x + monitor.width, Math.ceil(glass.x + glass.width) + pad);
+    const bottom = Math.min(monitor.y + monitor.height, Math.ceil(glass.y + glass.height) + pad);
+    return {
+        x: left,
+        y: top,
+        width: Math.max(1, right - left),
+        height: Math.max(1, bottom - top),
+    };
+}
 export function hexToColorArray(hex) {
     if (!hex || typeof hex !== 'string' || !hex.startsWith('#') || hex.length !== 7)
         return [1.0, 1.0, 1.0];
@@ -56,6 +107,8 @@ export class GlassLayer {
     _lastH;
     _lastFboW;
     _lastFboH;
+    _lastRefW;
+    _lastRefH;
     _lastRadius;
     constructor(opts) {
         this._opts = opts;
@@ -169,10 +222,13 @@ export class GlassLayer {
         const localY = bgY - fbo.y;
         if (geom.opacity !== undefined)
             this.bgActor.opacity = geom.opacity;
+        const refW = Math.max(1, geom.refSize?.width ?? fboW);
+        const refH = Math.max(1, geom.refSize?.height ?? fboH);
         const radius = geom.cornerRadius;
         if (this._lastX !== bgX || this._lastY !== bgY ||
             this._lastW !== bgW || this._lastH !== bgH ||
             this._lastFboW !== fboW || this._lastFboH !== fboH ||
+            this._lastRefW !== refW || this._lastRefH !== refH ||
             (radius !== undefined && this._lastRadius !== radius)) {
             // Transitions are removed on both sides of the write: Clutter will
             // happily animate a set_position/set_size that we mean to be immediate.
@@ -199,6 +255,7 @@ export class GlassLayer {
                 this._lastRadius = radius;
             }
             this.effect.setResolution(fboW, fboH);
+            this.effect.setReferenceResolution(refW, refH);
             this.effect.setGlassGeometry(localX, localY, bgW, bgH);
             this._lastX = bgX;
             this._lastY = bgY;
@@ -206,9 +263,13 @@ export class GlassLayer {
             this._lastH = bgH;
             this._lastFboW = fboW;
             this._lastFboH = fboH;
+            this._lastRefW = refW;
+            this._lastRefH = refH;
         }
         this.windowClones.setOffset(-fbo.x, -fbo.y);
-        this.uiSampler.refresh();
+        // Only rescans when uiGroup's children or their visibility actually
+        // changed; see UILayerSampler.refreshIfDirty().
+        this.uiSampler.refreshIfDirty();
         this.uiSampler.sync(fbo.x, fbo.y, fboW, fboH);
         this.windowClones.sync();
     }

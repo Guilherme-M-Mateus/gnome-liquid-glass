@@ -7,6 +7,7 @@ import { QuickSettingsManager } from './dist/quickSettingsManager.js';
 import { OsdManager } from './dist/osdManager.js';
 import { PanelManager } from './dist/panelManager.js';
 import { Logger } from './dist/logger.js';
+import { PerfProbe } from './dist/perfProbe.js';
 import GLib from 'gi://GLib';
 
 export default class LiquidGlassExtension extends Extension {
@@ -17,6 +18,11 @@ export default class LiquidGlassExtension extends Extension {
     this._logger = new Logger(this._settings);
 
     this._logger.log(`[Liquid Glass] Enabled. UUID: ${this.uuid}`);
+
+    // Frame-time instrumentation. Inert unless `output-logs` is on, and it
+    // watches that key itself, so it can be switched on at runtime to measure
+    // a scenario without reloading the shell.
+    this._perfProbe = new PerfProbe(this._settings, this._logger);
 
     // Initialize the UI manager for the top panel (e.g., Date Menu)
     // Pass the extension path so it can properly load the GLSL shader files
@@ -185,6 +191,11 @@ export default class LiquidGlassExtension extends Extension {
     if (this._panelManager) {
       this._panelManager.cleanup();
       this._panelManager = null;
+    }
+
+    if (this._perfProbe) {
+      this._perfProbe.cleanup();
+      this._perfProbe = null;
     }
 
     this._settings = null;

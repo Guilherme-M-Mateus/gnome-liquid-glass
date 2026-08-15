@@ -219,6 +219,21 @@ export default class LiquidGlassPreferences extends ExtensionPreferences {
     this._addRowToContainer(physGroup, blurMethodRow);
     settings.bind('blur-method', blurMethodRow, 'selected', Gio.SettingsBindFlags.DEFAULT);
 
+    // Rendering quality preset. "Quality" is the default and renders exactly as
+    // before this setting existed; the other two cap the blur kernel and let
+    // the glass shader take shortcuts, in exchange for GPU time.
+    const qualityRow = new Adw.ComboRow({
+      title: 'Rendering Quality',
+      subtitle: 'Lower levels reduce GPU cost by simplifying the blur and glass shader',
+      model: Gtk.StringList.new([
+        'Quality (Default)',
+        'Balanced',
+        'Performance'
+      ])
+    });
+    this._addRowToContainer(physGroup, qualityRow);
+    settings.bind('quality-level', qualityRow, 'selected', Gio.SettingsBindFlags.DEFAULT);
+
     this._addSliderRow(physGroup, settings, 'glass-max-z', 'Maximum Z Depth', 'Physical thickness of the glass', 0.0, 100.0, 1.0);
     this._addSliderRow(physGroup, settings, 'glass-displacement-scale', 'Displacement Scale', 'Strength of light refraction', 0.0, 200.0, 1.0);
     this._addSliderRow(physGroup, settings, 'glass-edge-smoothing', 'Edge Smoothing', 'Anti-aliasing feathering width', 0.0, 10.0, 0.1);

@@ -1,8 +1,6 @@
 // src/dockManager.js
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import GLib from 'gi://GLib';
-import Meta from 'gi://Meta';
-import { GlassLayer } from './glassSurface.js';
+import { GlassLayer, FrameLoop, tightFbo } from './glassSurface.js';
 // Padding to allow the shader to draw effects (like refraction and blur) outside the actor's strict bounds.
 const SHADER_PADDING = 20;
 // Utility: Convert HEX color string (e.g., "#ffffff") to normalized RGB array [1.0, 1.0, 1.0]
@@ -33,7 +31,7 @@ export class DashManager {
     _glassExpand;
     _signals;
     _settingsSignals; // GSettingsのイベントリスナーを管理
-    _frameSyncId;
+    _frameLoop;
     _isEffectActive; // エフェクトが現在適用されているかのフラグ
     _originalStyle;
     _currentMarginStyle;
@@ -53,6 +51,19 @@ export class DashManager {
     _lastBaseH;
     _outputLogs = false;
     _marginValue = 0;
+    // The render target: a box around the dock rather than the whole monitor.
+    _lastFboX;
+    _lastFboY;
+    _lastFboW;
+    _lastFboH;
+    // Sized inputs to the render target; refreshed from their 'changed::'.
+    _blurRadius = 0;
+    _shadowRadius = 0;
+    // Cached result of _findReferenceActor, plus the signals that invalidate it.
+    _refActor = null;
+    _refActorValid = false;
+    _refActorDestroyId = null;
+    _dashWatchSignals = [];
     _uiSampler = null;
     layer = null;
     _windowCloneManager = null;
@@ -66,7 +77,7 @@ export class DashManager {
         this._glassExpand = 0; // ガラスエリアの拡張量（ピクセル）
         this._signals = [];
         this._settingsSignals = []; // GSettingsのイベントリスナーを管理
-        this._frameSyncId = 0;
+        this._frameLoop = null;
         this._isEffectActive = false; // エフェクトが現在適用されているかのフラグ
     }
     // 拡張機能が有効化された時に呼ばれるエントリーポイント
@@ -121,8 +132,14 @@ export class DashManager {
         });
         connectSetting('dock-blur-radius', () => {
             const radius = this._settings.get_int('dock-blur-radius');
+            this._blurRadius = radius;
             if (this.effect && this._isEffectActive)
                 this.effect.setBlurRadius(radius);
+        });
+        // Not a dock-prefixed key, but the shadow's decay distance helps size the
+        // render target, so it is tracked here too.
+        connectSetting('shadow-radius', () => {
+            this._shadowRadius = this._settings.get_double('shadow-radius');
         });
         connectSetting('dock-corner-radius', () => {
             if (this.effect && this._isEffectActive) {
@@ -200,6 +217,8 @@ export class DashManager {
         // 動的マージンを適用
         this._applyMargin();
         this._marginValue = this._settings.get_int('dock-margin-bottom');
+        this._blurRadius = this._settings.get_int('dock-blur-radius');
+        this._shadowRadius = this._settings.get_double('shadow-radius');
         this._glassExpand = this._settings.get_int("dock-glass-expand");
         this._outputLogs = this._settings.get_boolean('output-logs');
         let dockRoot = this.targetActor;
@@ -226,10 +245,6 @@ export class DashManager {
         this._windowCloneManager = this.layer.windowClones;
         this._uiSampler = this.layer.uiSampler;
         this.layer.show();
-        const laterAdd = (laterType, callback) => {
-            return global.compositor.get_laters().add(laterType, callback);
-        };
-        const frameLaterType = Meta.LaterType.BEFORE_REDRAW;
         // Rebuild clones (called on menu open): delegate entirely to WindowCloneManager + UILayerSampler
         let buildClones = () => {
             if (!this.bgActor)
@@ -253,33 +268,22 @@ export class DashManager {
             this._uiSampler?.rebindSelf();
             this._uiSampler?.refresh();
         };
-        let frameTick = () => {
-            this._frameSyncId = 0;
-            if (!this.bgActor || !this.targetActor.mapped)
-                return GLib.SOURCE_REMOVE;
-            this._syncGeometry();
-            this._frameSyncId = laterAdd(frameLaterType, frameTick);
-            return GLib.SOURCE_REMOVE;
-        };
-        let startFrameSync = () => {
-            if (this._frameSyncId === 0) {
-                buildClones();
-                this._frameSyncId = laterAdd(frameLaterType, frameTick);
-            }
-        };
+        // Uses the shared FrameLoop rather than a hand-rolled later chain. The
+        // unmap branch below used to only zero the stored id without removing the
+        // later, which left the callback armed against a tree that was about to be
+        // torn down, and let a subsequent start arm a second concurrent chain.
+        // FrameLoop.stop() removes the later, so that failure mode is gone.
+        this._watchDashContents();
+        this._frameLoop = new FrameLoop(() => this._syncGeometry(), () => !!this.bgActor && this.targetActor.mapped, () => buildClones());
         let mapSignalId = this.targetActor.connect('notify::mapped', () => {
-            if (this.targetActor.mapped) {
-                startFrameSync();
-            }
-            else {
-                if (this._frameSyncId !== 0) {
-                    this._frameSyncId = 0;
-                }
-            }
+            if (this.targetActor.mapped)
+                this._frameLoop?.start();
+            else
+                this._frameLoop?.stop();
         });
         this._signals.push(mapSignalId);
         if (this.targetActor.mapped) {
-            startFrameSync();
+            this._frameLoop.start();
         }
     }
     _syncGeometry() {
@@ -356,7 +360,7 @@ export class DashManager {
         }
         this._lastBaseW = baseW;
         this._lastBaseH = baseH;
-        let refActor = this._findReferenceActor(this.targetActor);
+        let refActor = this._getReferenceActor();
         if (refActor) {
             let [refW, refH] = refActor.get_size();
             let [refX, refY] = refActor.get_transformed_position();
@@ -425,7 +429,10 @@ export class DashManager {
         // this._logger.log(`[Gap] ${absX}, ${absY}, ${baseW}, ${baseH}`);
         // --------------------------------------------------------------------
         // --------------------------------------------------------------------
-        let marginValue = this._settings.get_int('dock-margin-bottom') || 0;
+        // Use the cached copy rather than re-reading GSettings: this runs on every
+        // frame of the dock's sync loop, and _marginValue is already kept current
+        // by the 'changed::dock-margin-bottom' handler in _bindSettings().
+        let marginValue = this._marginValue;
         if (monitor && marginValue > 0) {
             // アプリ起動時の微小揺れ（誤動作の元）を完全に無視するため、閾値を大きく設定
             let isMoving = false;
@@ -556,36 +563,44 @@ export class DashManager {
         // dock-centred local coordinate system inside the full-screen FBO.
         let localBgX = bgX - monitor.x;
         let localBgY = bgY - monitor.y;
+        // The render target is the dock plus the reach of the blur and the shadow,
+        // not the whole monitor. Both the blur chain and the composite pass run
+        // over the entire target, and the dock is a thin strip along one edge, so
+        // this is the bulk of its per-frame GPU cost.
+        const fbo = tightFbo({ x: bgX, y: bgY, width: bgW, height: bgH }, { x: monitor.x, y: monitor.y, width: screenW, height: screenH }, this._blurRadius, this._shadowRadius);
         // Detect any change in dock geometry OR monitor size to trigger a rebuild.
         if (this._lastBgW !== bgW || this._lastBgH !== bgH ||
             this._lastBgX !== bgX || this._lastBgY !== bgY ||
-            this._lastScreenW !== screenW || this._lastScreenH !== screenH) {
+            this._lastScreenW !== screenW || this._lastScreenH !== screenH ||
+            this._lastFboX !== fbo.x || this._lastFboY !== fbo.y ||
+            this._lastFboW !== fbo.width || this._lastFboH !== fbo.height) {
             this.bgActor.remove_transition('size');
             this.bgActor.remove_transition('position');
-            this.bgActor.set_position(monitor.x, monitor.y);
-            this.bgActor.set_size(screenW, screenH);
+            this.bgActor.set_position(fbo.x, fbo.y);
+            this.bgActor.set_size(fbo.width, fbo.height);
             this.bgActor.remove_transition('size');
             this.bgActor.remove_transition('position');
             this.liquidBox?.set_position(0, 0);
-            this.liquidBox?.set_size(screenW, screenH);
+            this.liquidBox?.set_size(fbo.width, fbo.height);
+            // The soft clip that used to bound fragment work here is redundant now
+            // that the target itself is bounded, and it would cut into the region
+            // the shadow needs.
+            this.bgActor.remove_clip();
             this._lastBgW = bgW;
             this._lastBgH = bgH;
             this._lastBgX = bgX;
             this._lastBgY = bgY;
             this._lastScreenW = screenW;
             this._lastScreenH = screenH;
+            this._lastFboX = fbo.x;
+            this._lastFboY = fbo.y;
+            this._lastFboW = fbo.width;
+            this._lastFboH = fbo.height;
         }
-        // Soft clipping via set_clip — limits GPU fragment-shader execution
-        // to the dock region + a generous margin for drop-shadow decay, without
-        // using clip_to_allocation (which hard-clips child actors and severs shadows).
-        //
-        // CLIP_PADDING must be at least as large as the maximum shadow_radius
-        // setting so the penumbra gradient has room to fade to zero naturally.
-        const CLIP_PADDING = 200;
-        // Clip only bgActor; liquidBox has no separate clip
-        // this.liquidBox?.remove_clip();
-        this.bgActor.set_clip(localBgX - CLIP_PADDING, localBgY - CLIP_PADDING, bgW + CLIP_PADDING * 2, bgH + CLIP_PADDING * 2);
-        const SHADOW_MAX_RADIUS = CLIP_PADDING - 20;
+        // Unchanged from the old CLIP_PADDING - 20. The shadow's visible extent is
+        // governed by the user's shadow-radius, which stays well inside the target;
+        // this is only the outer cutoff.
+        const SHADOW_MAX_RADIUS = 180;
         this.effect?.setShadowMaxRadius(SHADOW_MAX_RADIUS);
         /*
         if (this._outputLogs) {
@@ -598,24 +613,28 @@ export class DashManager {
             `screen=${screenW}x${screenH}`);
         }
         */
-        // setResolution receives the full monitor dimensions (was bgW/bgH).
-        // The shader uses resolution to compute UV-to-pixel mapping over the full FBO.
-        this.effect?.setResolution(screenW, screenH);
-        // Inform the shader where the dock lives within the full-screen FBO.
-        // The shader uses these to compute dock_center and box_size, replacing
-        // the old "resolution * 0.5" center assumption that only worked when
-        // the FBO was dock-sized.
-        this.effect?.setGlassGeometry(localBgX, localBgY, bgW, bgH);
+        // Resolution follows the render target. The optical constants stay pinned
+        // to the monitor size the dock has always normalized against, so narrowing
+        // the target does not change how the glass looks.
+        this.effect?.setResolution(fbo.width, fbo.height);
+        this.effect?.setReferenceResolution(screenW, screenH);
+        // Inform the shader where the dock lives within the FBO. The shader uses
+        // these to compute dock_center and box_size, replacing the old
+        // "resolution * 0.5" center assumption that only worked when the FBO was
+        // dock-sized.
+        this.effect?.setGlassGeometry(bgX - fbo.x, bgY - fbo.y, bgW, bgH);
         // Clones in WindowCloneManager are placed at (w.x, w.y) — absolute screen
-        // coordinates. The container shift of (-monitor.x, -monitor.y) makes each
-        // clone appear at (w.x - monitor.x, w.y - monitor.y) inside the full-screen
-        // FBO, which maps back to (w.x, w.y) in screen space once bgActor's
-        // monitor-origin position is added by Clutter's scene graph. ✓
-        this._windowCloneManager?.setOffset(-monitor.x, -monitor.y);
-        // UILayerSampler is synced with the monitor origin and full-screen
-        // dimensions instead of the dock-relative bgX/bgY/bgW/bgH.
-        this._uiSampler?.refresh();
-        this._uiSampler?.sync(monitor.x, monitor.y, screenW, screenH);
+        // coordinates. The container shift of (-fbo.x, -fbo.y) makes each clone
+        // appear at (w.x - fbo.x, w.y - fbo.y) inside the FBO, which maps back to
+        // (w.x, w.y) in screen space once bgActor's own position is added by
+        // Clutter's scene graph. ✓
+        this._windowCloneManager?.setOffset(-fbo.x, -fbo.y);
+        // UILayerSampler is synced with the render target's origin and dimensions
+        // instead of the dock-relative bgX/bgY/bgW/bgH.
+        // Only rescans when uiGroup's children or their visibility actually
+        // changed; see UILayerSampler.refreshIfDirty().
+        this._uiSampler?.refreshIfDirty();
+        this._uiSampler?.sync(fbo.x, fbo.y, fbo.width, fbo.height);
         this._windowCloneManager?.sync();
     }
     _syncActorProperties(source, clone) {
@@ -693,15 +712,9 @@ export class DashManager {
                 children[i].opacity = 255;
             }
         }
-        if (this._frameSyncId !== 0) {
-            if (global.compositor?.get_laters) {
-                global.compositor.get_laters().remove(this._frameSyncId);
-            }
-            else {
-                // Meta.later_remove(this._frameSyncId);
-            }
-            this._frameSyncId = 0;
-        }
+        this._frameLoop?.stop();
+        this._frameLoop = null;
+        this._unwatchDashContents();
         // Teardown order (effect before actor) is handled by GlassLayer.
         this.layer?.destroy();
         this.layer = null;
@@ -722,6 +735,81 @@ export class DashManager {
             }
             this._settingsSignals = [];
         }
+    }
+    /**
+     * Cached wrapper around _findReferenceActor.
+     *
+     * The search walks the whole dash subtree calling toString() on each actor.
+     * In GJS that builds a formatted wrapper description string per actor, so
+     * running it every frame allocated garbage across the entire subtree inside
+     * the compositor thread. The result only changes when the dash's contents
+     * change, so it is resolved once and invalidated by the dash's own
+     * child-added / child-removed signals (see _watchDashContents).
+     */
+    _getReferenceActor() {
+        if (this._refActorValid)
+            return this._refActor;
+        this._refActor = this._findReferenceActor(this.targetActor);
+        this._refActorValid = true;
+        // Invalidate if it goes away without the dash reporting a change.
+        if (this._refActor) {
+            const actor = this._refActor;
+            const id = actor.connect('destroy', () => {
+                this._refActor = null;
+                this._refActorValid = false;
+            });
+            this._refActorDestroyId = { actor, id };
+        }
+        return this._refActor;
+    }
+    /**
+     * Watches the dash subtree so the cached reference actor is dropped whenever
+     * its contents change (an app is pinned, a window opens, the dock relayouts).
+     * Connected at the container and one level down, which is where Dash to Dock
+     * adds and removes icons.
+     */
+    _watchDashContents() {
+        const invalidate = () => {
+            this._refActorValid = false;
+            if (this._refActorDestroyId) {
+                try {
+                    this._refActorDestroyId.actor.disconnect(this._refActorDestroyId.id);
+                }
+                catch (_) { }
+                this._refActorDestroyId = null;
+            }
+            this._refActor = null;
+        };
+        const watch = (actor) => {
+            if (!actor || typeof actor.connect !== 'function')
+                return;
+            this._dashWatchSignals.push({ actor, id: actor.connect('child-added', invalidate) });
+            this._dashWatchSignals.push({ actor, id: actor.connect('child-removed', invalidate) });
+        };
+        watch(this.targetActor);
+        for (const child of this.targetActor.get_children()) {
+            watch(child);
+            for (const grandchild of child.get_children())
+                watch(grandchild);
+        }
+    }
+    _unwatchDashContents() {
+        for (const { actor, id } of this._dashWatchSignals) {
+            try {
+                actor.disconnect(id);
+            }
+            catch (_) { }
+        }
+        this._dashWatchSignals = [];
+        if (this._refActorDestroyId) {
+            try {
+                this._refActorDestroyId.actor.disconnect(this._refActorDestroyId.id);
+            }
+            catch (_) { }
+            this._refActorDestroyId = null;
+        }
+        this._refActor = null;
+        this._refActorValid = false;
     }
     // ドックの内部から、計算の基準となるアイコンまたはインジケーターを1つ再帰的に探し出す
     _findReferenceActor(actor) {

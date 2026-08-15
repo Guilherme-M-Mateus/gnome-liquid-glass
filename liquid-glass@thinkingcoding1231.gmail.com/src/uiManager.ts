@@ -6,7 +6,7 @@ import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Gio from 'gi://Gio';
 import { LiquidEffect } from './liquidEffect.js';
-import { GlassLayer } from './glassSurface.js';
+import { GlassLayer, tightFbo } from './glassSurface.js';
 import { AdaptiveTextController, AdaptiveGroup, groupByCard } from './adaptiveText.js';
 import { UnpickableActor, UILayerSampler, UnpickableWidget, WindowCloneManager } from './utils.js';
 
@@ -79,6 +79,22 @@ export class UIManager {
 
   private _lastScreenW: number | undefined;
   private _lastScreenH: number | undefined;
+
+  // The render target: a box around the menu rather than the whole monitor.
+  // Kept as fields because the clone sync below the geometry block needs the
+  // same origin the actors were placed at.
+  private _fboX: number = 0;
+  private _fboY: number = 0;
+  private _fboW: number = 1;
+  private _fboH: number = 1;
+  private _lastFboX: number | undefined;
+  private _lastFboY: number | undefined;
+  private _lastFboW: number | undefined;
+  private _lastFboH: number | undefined;
+
+  // Sized inputs to the render target; refreshed from their 'changed::'.
+  private _blurRadius: number = 0;
+  private _shadowRadius: number = 0;
 
   constructor(extensionPath: string, settings: Gio.Settings, logger: Logger) {
     this.extensionPath = extensionPath;
@@ -237,9 +253,16 @@ export class UIManager {
     });
 
     connectSetting('popup-blur-radius', () => {
+      this._blurRadius = this._settings.get_int('popup-blur-radius');
       if (this.effect) {
-        this.effect.setBlurRadius(this._settings.get_int('popup-blur-radius'));
+        this.effect.setBlurRadius(this._blurRadius);
       }
+    });
+
+    // Not a popup-prefixed key, but the shadow's decay distance helps size the
+    // render target, so it is tracked here too.
+    connectSetting('shadow-radius', () => {
+      this._shadowRadius = this._settings.get_double('shadow-radius');
     });
 
     connectSetting('popup-brightness', () => {
@@ -337,6 +360,8 @@ export class UIManager {
     }
 
     this._cornerRadius = this._settings.get_double('popup-corner-radius');
+    this._blurRadius = this._settings.get_int('popup-blur-radius');
+    this._shadowRadius = this._settings.get_double('shadow-radius');
 
     // Actor tree, shader and clone samplers — all shared, see glassSurface.ts.
     // This glass goes *above* panelBox rather than below its own root, so the
@@ -554,47 +579,59 @@ export class UIManager {
       let localBgX = bgX - monitorX;
       let localBgY = bgY - monitorY;
 
+      // The render target is the menu plus the reach of the blur and shadow,
+      // not the whole monitor. The blur chain and the composite pass both run
+      // over the entire target, so for a menu occupying a fraction of the
+      // screen this is most of the per-frame GPU cost.
+      const fbo = tightFbo({ x: bgX, y: bgY, width: bgW, height: bgH },
+        { x: monitorX, y: monitorY, width: screenW, height: screenH },
+        this._blurRadius, this._shadowRadius);
+
       // Only update positions/sizes if they actually changed to save CPU cycles
       if (this._lastBgW !== bgW || this._lastBgH !== bgH ||
         this._lastBgX !== bgX || this._lastBgY !== bgY ||
-        this._lastScreenW !== screenW || this._lastScreenH !== screenH) {
+        this._lastScreenW !== screenW || this._lastScreenH !== screenH ||
+        this._lastFboX !== fbo.x || this._lastFboY !== fbo.y ||
+        this._lastFboW !== fbo.width || this._lastFboH !== fbo.height) {
 
-        // 1. bgActor: full monitor size, positioned at monitor origin
+        // 1. bgActor: the render target, at its own origin
         this.bgActor.remove_transition('size');
         this.bgActor.remove_transition('position');
-        this.bgActor.set_position(monitorX, monitorY);
-        this.bgActor.set_size(screenW, screenH);
+        this.bgActor.set_position(fbo.x, fbo.y);
+        this.bgActor.set_size(fbo.width, fbo.height);
         this.bgActor.remove_transition('size');
         this.bgActor.remove_transition('position');
 
-        // 2. liquidBox: full monitor size (relative to bgActor = 0,0)
+        // 2. liquidBox: same extent (relative to bgActor = 0,0)
         this.liquidBox?.set_position(0, 0);
-        this.liquidBox?.set_size(screenW, screenH);
+        this.liquidBox?.set_size(fbo.width, fbo.height);
 
-        // 3. GPU-efficient soft clip — limits rendering to the menu region +
-        //    generous margin for drop-shadow decay without hard-clipping children.
-        const CLIP_PADDING = 200;
-        // this.liquidBox?.remove_clip();
+        // 3. No soft clip needed: the target is already bounded to the region
+        //    that can contribute, and liquidBox clips to its allocation.
+        this.bgActor.remove_clip();
 
-        this.bgActor.set_clip(
-          localBgX - CLIP_PADDING, localBgY - CLIP_PADDING,
-          bgW + CLIP_PADDING * 2, bgH + CLIP_PADDING * 2
-        );
-
-        const SHADOW_MAX_RADIUS = CLIP_PADDING - 20;
+        const SHADOW_MAX_RADIUS = 180;
         this.effect?.setShadowMaxRadius(SHADOW_MAX_RADIUS);
 
-        // 4. Update shader with full-screen resolution
-        this.effect?.setResolution(screenW, screenH);
+        // 4. Resolution follows the target; the optical constants stay pinned
+        //    to the monitor size they have always used, so narrowing the target
+        //    does not change how the glass looks.
+        this.effect?.setResolution(fbo.width, fbo.height);
+        this.effect?.setReferenceResolution(screenW, screenH);
 
-        // 5. Tell the shader where the menu lives within the full-screen FBO
+        // 5. Tell the shader where the menu lives within the FBO
         //    (matches the dockManager setGlassGeometry pattern)
-        this.effect?.setGlassGeometry(localBgX, localBgY, bgW, bgH);
+        this.effect?.setGlassGeometry(bgX - fbo.x, bgY - fbo.y, bgW, bgH);
 
         this._lastBgW = bgW; this._lastBgH = bgH;
         this._lastBgX = bgX; this._lastBgY = bgY;
         this._lastScreenW = screenW; this._lastScreenH = screenH;
+        this._lastFboX = fbo.x; this._lastFboY = fbo.y;
+        this._lastFboW = fbo.width; this._lastFboH = fbo.height;
       }
+
+      this._fboX = fbo.x; this._fboY = fbo.y;
+      this._fboW = fbo.width; this._fboH = fbo.height;
     }
 
     if (this.effect) {
@@ -610,9 +647,13 @@ export class UIManager {
     // WindowCloneManager handles background + window actor clones.
     // UILayerSampler handles all uiGroup children — including the overview actors
     // automatically, so no separate overview/isOverview branch is needed.
-    this._windowCloneManager?.setOffset(-monitorX, -monitorY);
-    this._uiSampler?.refresh();
-    this._uiSampler?.sync(monitorX, monitorY, screenW, screenH);
+    // Clones are positioned relative to the render target's origin, which is no
+    // longer the monitor origin.
+    this._windowCloneManager?.setOffset(-this._fboX, -this._fboY);
+    // Only rescans when uiGroup's children or their visibility actually
+    // changed; see UILayerSampler.refreshIfDirty().
+    this._uiSampler?.refreshIfDirty();
+    this._uiSampler?.sync(this._fboX, this._fboY, this._fboW, this._fboH);
     this._windowCloneManager?.sync();
   }
 

@@ -66,6 +66,11 @@ export class PanelManager {
     _topMargin;
     _panelHeight;
     _transparent;
+    // Read by _syncGeometry on every frame, so they are cached here and
+    // refreshed from their 'changed::' handlers rather than fetched per frame.
+    _cornerRadiusSetting;
+    _blurRadius;
+    _shadowRadius;
     // Overview state. _inOverview stops the frame loop entirely;
     // _overviewTransition suppresses the per-frame opacity write so the fade
     // tween is not overwritten on the very next frame.
@@ -94,6 +99,9 @@ export class PanelManager {
         this._topMargin = 4;
         this._panelHeight = 0;
         this._transparent = false;
+        this._cornerRadiusSetting = 0;
+        this._blurRadius = 0;
+        this._shadowRadius = 0;
         this._inOverview = false;
         this._overviewTransition = false;
     }
@@ -135,11 +143,22 @@ export class PanelManager {
         });
         connectSetting('panel-blur-radius', () => {
             let v = this._settings.get_int('panel-blur-radius');
+            this._blurRadius = v;
+            // The blur reach sets how far the FBO band must extend past the glass.
+            this._resetGeometryCaches();
             forEachEffect(e => e.setBlurRadius(v));
         });
         connectSetting('panel-corner-radius', () => {
             // Deliberately not pushed straight to the effect: the usable radius is
             // capped at half the panel height, and _syncGeometry owns that clamp.
+            this._cornerRadiusSetting = this._settings.get_double('panel-corner-radius');
+            this._resetGeometryCaches();
+        });
+        // Not a panel-prefixed key — the shadow is a global glass setting, pushed
+        // to the effect by LiquidEffect's own binding. It is tracked here only
+        // because the shadow's decay distance also sizes the FBO band.
+        connectSetting('shadow-radius', () => {
+            this._shadowRadius = this._settings.get_double('shadow-radius');
             this._resetGeometryCaches();
         });
         connectSetting('panel-brightness', () => {
@@ -288,6 +307,9 @@ export class PanelManager {
         this._topMargin = this._settings.get_int('panel-top-margin');
         this._panelHeight = this._settings.get_int('panel-height');
         this._transparent = this._settings.get_boolean('panel-transparent');
+        this._cornerRadiusSetting = this._settings.get_double('panel-corner-radius');
+        this._blurRadius = this._settings.get_int('panel-blur-radius');
+        this._shadowRadius = this._settings.get_double('shadow-radius');
         this._adaptiveText?.syncSettings();
         this._inOverview = Main.overview?.visible ?? false;
         this._warnIfBlurMyShellPanelBlur();
@@ -697,7 +719,7 @@ export class PanelManager {
         // shorter side produces a degenerate shape. A panel is only ~30px tall, so
         // the raw setting almost always needs clamping. Clamped to exactly half it
         // becomes a capsule, which is the intended floating-pill look.
-        const cornerRadius = Math.max(0, Math.min(this._settings.get_double('panel-corner-radius'), (vh + 2 * expand) / 2));
+        const cornerRadius = Math.max(0, Math.min(this._cornerRadiusSetting, (vh + 2 * expand) / 2));
         if (!this._floating) {
             // Full width: span the monitor and push the top edge off-screen by the
             // corner radius, so the top corners round out of sight and only the
@@ -732,8 +754,8 @@ export class PanelManager {
         // a permanent target this is the difference between blurring ~180 rows and
         // ~1080 every frame. The band must clear the glass by the blur reach and
         // the shadow decay, or a bright seam appears along the edge.
-        const blurReach = this._settings.get_int('panel-blur-radius') * 2;
-        const shadowReach = this._settings.get_double('shadow-radius');
+        const blurReach = this._blurRadius * 2;
+        const shadowReach = this._shadowRadius;
         const pad = Math.ceil(Math.max(blurReach, shadowReach)) + BAND_SLACK;
         const bandTop = Math.max(monitor.y, bgY - pad);
         const bandBottom = Math.min(monitor.y + monitor.height, bgY + bgH + pad);

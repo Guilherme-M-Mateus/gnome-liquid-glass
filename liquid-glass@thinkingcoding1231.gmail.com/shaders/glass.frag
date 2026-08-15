@@ -4,6 +4,34 @@ uniform sampler2D cogl_sampler1; // Layer 1: ブラー済み背景
 
 uniform float resolution_x;
 uniform float resolution_y;
+
+// [NEW] Reference resolution for the optical constants.
+//
+// resolution_* is the size of the render target. Several quantities below are
+// normalized against it even though they describe the *glass*, not the buffer:
+// the refraction thickness (displacement_scale / minRes), the chromatic
+// aberration width, and the finite-difference step used to estimate the
+// surface normal. That coupling means shrinking the render target — which is
+// purely an optimization, since the glass occupies a small part of a
+// full-monitor FBO — would visibly change the refraction.
+//
+// So the optical math reads ref_resolution_* instead, which stays pinned to
+// the size the surface has always normalized against, while resolution_*
+// follows the actual buffer. Genuinely per-texel quantities (the AA tap
+// offsets and the edge margin) still use resolution_*, which is correct:
+// those are measured in texels of the buffer being sampled.
+//
+// Falls back to resolution_* when unset (0), so the shader stays correct if a
+// caller never supplies it.
+uniform float ref_resolution_x;
+uniform float ref_resolution_y;
+
+// [NEW] Rendering quality preset: 0 = Quality, 1 = Balanced, 2 = Performance.
+//
+// 0 is the default and must render identically to the shader before this
+// existed. Higher levels opt into approximations the user has explicitly asked
+// for, in exchange for GPU time.
+uniform float quality_level;
 uniform float pointer_x;
 uniform float pointer_y;
 uniform float intensity;
@@ -193,8 +221,273 @@ vec3 applySCB(vec3 color, float b, float c, float s) {
     return max(color, 0.0);
 }
 
+// Computes the lit glass colour (unpremultiplied) for one fragment.
+//
+// Split out of main() so the call site can skip it wholesale. Every value in
+// here reaches the output only through `litColor * alpha`, and alpha
+// (insideMask) is exactly 0 outside the shape — so for those fragments this
+// whole body is computed and then multiplied away. The uniforms it reads are
+// globals; only the locals main() already computed are passed in.
+vec3 computeLitColor(vec2 uv, vec2 resolution, vec2 refRes, vec2 local_pos, vec2 box_size,
+                     float d, float edgeFeather, float insideMask,
+                     float lightAngleRad) {
+    // refRes, not resolution: see the ref_resolution_* uniform comment. These
+    // three describe the glass surface, so they must not move when the render
+    // target is resized.
+    vec2 gradH = heightGradient(local_pos, box_size, corner_radius, max_z, refRes);
+    vec3 normal = getNormal(gradH);
+
+    vec2 disp = getDisplacement(d, normal, refRes);
+
+    // Dampen the refraction near the exact boundaries to eliminate jagged artifacts.
+    float edgeDampen = smoothstep(0.0, edgeFeather * 3.0, -d);
+    disp *= edgeDampen;
+
+    vec2 refractedUv = stabilizedUV(uv + disp, uv);
+
+    float minRes = max(min(refRes.x, refRes.y), 1.0);
+    vec2 chromaDir = length(disp) > 0.00001 ? normalize(disp) : vec2(0.0);
+    
+    // Calculate Chromatic Aberration vectors (separating RGB channels slightly).
+    vec2 chromaVec = chromaDir * (chroma_strength / minRes) * edgeDampen;
+    vec2 uvR = stabilizedUV(refractedUv + chromaVec, refractedUv);
+    vec2 uvG = refractedUv;
+    vec2 uvB = stabilizedUV(refractedUv - chromaVec, refractedUv);
+
+    // Step 1: RGSS (Rotated Grid Super-Sampling) Pattern Implementation
+    // Instead of sampling in a simple square, sampling in a slanted diamond pattern
+    // provides significantly better anti-aliasing for both horizontal and vertical edges.
+    float edgeProximity = 1.0 - smoothstep(0.0, edgeFeather * 4.0, -d);
+    float aa_spread = mix(0.75, 2.5, edgeProximity);
+    vec2 texel = vec2(aa_spread) / resolution;
+
+    vec2 off1 = vec2( 0.375, -0.125) * texel;
+    vec2 off2 = vec2( 0.125,  0.375) * texel;
+    vec2 off3 = vec2(-0.375,  0.125) * texel;
+    vec2 off4 = vec2(-0.125, -0.375) * texel;
+
+    // Hard limit sampling coordinates to 1.2px inside the texture bounds.
+    // This prevents bilinear filtering from accidentally pulling in black/transparent 
+    // pixels from the void outside the texture space.
+    vec2 margin = vec2(1.2) / resolution;
+    #define SAFE(u) clamp(u, margin, 1.0 - margin)
+
+    // Step 2: Multi-tap Sampling (Averaging 4 sub-pixels to smooth out the image)
+    //
+    // The three channels are fetched separately so each can be displaced by the
+    // chromatic aberration — 4 taps x 3 channels = 12 fetches per fragment,
+    // of which 8 of the 12 fetched RGBA values are discarded.
+    //
+    // When the three coordinate sets coincide, one RGB fetch per tap returns
+    // exactly what three per-channel fetches would, for a third of the
+    // bandwidth. That happens whenever chromatic aberration is off — the common
+    // case for anyone who has turned it down to zero.
+    //
+    // The test is an exact coordinate comparison rather than `chroma_strength
+    // == 0`: uvR and uvB additionally pass through stabilizedUV(), so a zero
+    // chroma vector alone does not guarantee they equal uvG near the texture
+    // edge. Comparing the coordinates themselves is correct everywhere.
+    //
+    // At quality_level >= 1 the same collapse is also applied when the
+    // aberration is present but narrower than half a texel, where it cannot
+    // resolve to a visible difference. That one is an approximation, which is
+    // why it is gated behind the preset instead of applying by default.
+    vec3 refractedRgb;
+    bool chromaCollapses = (uvR == uvG && uvB == uvG);
+    if (!chromaCollapses && quality_level >= 0.5) {
+        float chromaTexels = length(chromaVec * resolution);
+        chromaCollapses = chromaTexels < 0.5;
+    }
+
+    if (chromaCollapses) {
+        refractedRgb = (
+            texture2D(cogl_sampler1, SAFE(uvG + off1)).rgb +
+            texture2D(cogl_sampler1, SAFE(uvG + off2)).rgb +
+            texture2D(cogl_sampler1, SAFE(uvG + off3)).rgb +
+            texture2D(cogl_sampler1, SAFE(uvG + off4)).rgb) * 0.25;
+    } else {
+    refractedRgb = vec3(
+        (texture2D(cogl_sampler1, SAFE(uvR + off1)).r +
+         texture2D(cogl_sampler1, SAFE(uvR + off2)).r +
+         texture2D(cogl_sampler1, SAFE(uvR + off3)).r +
+         texture2D(cogl_sampler1, SAFE(uvR + off4)).r) * 0.25,
+
+        (texture2D(cogl_sampler1, SAFE(uvG + off1)).g +
+         texture2D(cogl_sampler1, SAFE(uvG + off2)).g +
+         texture2D(cogl_sampler1, SAFE(uvG + off3)).g +
+         texture2D(cogl_sampler1, SAFE(uvG + off4)).g) * 0.25,
+
+        (texture2D(cogl_sampler1, SAFE(uvB + off1)).b +
+         texture2D(cogl_sampler1, SAFE(uvB + off2)).b +
+         texture2D(cogl_sampler1, SAFE(uvB + off3)).b +
+         texture2D(cogl_sampler1, SAFE(uvB + off4)).b) * 0.25
+    );
+    }
+
+    // Apply color saturation, contrast, brightness
+    vec3 adjustedRefracted = applySCB(refractedRgb, brightness, contrast, saturation); 
+    vec3 refracted = adjustedRefracted;
+
+    vec3 tintColor = vec3(tint_r, tint_g, tint_b);
+    vec3 insideBaseColor = mix(refracted, tintColor, tint_strength);
+
+    // [FIX] Do NOT multiply by insideMask here. insideMask is the same
+    // value used as `alpha` below, and the final composite already
+    // multiplies the fully-lit color by it exactly once
+    // (finalRgb = litColor * alpha), matching Cogl/Clutter's
+    // premultiplied-alpha compositing (out = src.rgb + dst.rgb*(1-src.a)).
+    //
+    // Baking insideMask into baseColor here AS WELL made rgb fall off as
+    // insideMask^2 instead of insideMask^1 across the antialiased edge band
+    // (the +-edge_smoothing px zone where insideMask is fractional, i.e.
+    // exactly where the visible glass boundary sits). An under-premultiplied
+    // color (rgb/alpha < true color) reads as a dark ring right at that
+    // boundary once composited over the background — invisible at small
+    // edge_smoothing (the transition band is only ~1-2px wide, too thin to
+    // notice) but clearly visible once edge_smoothing is turned up, since
+    // the band widens and the darkening becomes visible.
+    //
+    // This is independent of shadow_radius/shadow_intensity (radiusEnable
+    // below already zeroes the drop shadow correctly at shadow_radius=0);
+    // the ring persists even with the drop shadow fully disabled, which is
+    // exactly the "Shadow Radius 0, Edge Smoothing >0" symptom reported.
+    vec3 baseColor = insideBaseColor;
+
+    // ------------------------------------------------------------------
+    // Inner depth effects — make the glass look 3D on LIGHT backgrounds
+    // where refraction and rim alone are not visible.
+    //
+    // A curved glass body has two visual cues that read as "3D" even
+    // when the refracted background is invisible (e.g. on a white wall):
+    //   (a) AMBIENT OCCLUSION near the inside edge — the glass body
+    //       itself blocks light, so the inside edge is darker than
+    //       the center. (This is the "shadow under the glass" the user
+    //       asked about.)
+    //   (b) A FOCAL HIGHLIGHT where light converges through the curved
+    //       surface, biased slightly toward the light source.
+    //
+    // These are baked into the base color BEFORE the screen-blend
+    // lighting pass, so they interact correctly with the rim / sheen
+    // / specular that follow.
+    // ------------------------------------------------------------------
+
+    // (a) Inner shadow: dark band just inside the glass edge.
+    //     aoMask = 1 at d=0 (right at the edge), fading to 0 at
+    //     d = -ao_radius (ao_radius px inward from the edge).
+    //     Strength is controlled independently by ao_intensity (0-1).
+    //     [CHANGED] Previously this reused rim_width for its falloff
+    //     distance and was multiplied by the drop shadow's radiusEnable
+    //     (so it silently disappeared whenever shadow_radius was 0). Both
+    //     couplings are removed here so the inner AO darkening has its own
+    //     independent radius/intensity controls, matching the outer drop
+    //     shadow's separate radius/intensity pair.
+    float aoMask = 1.0 - smoothstep(0.0, max(ao_radius, 0.001), -d);
+    baseColor *= (1.0 - aoMask * ao_intensity);
+
+    // (b) Center focal highlight: bright spot offset slightly toward
+    //     the light source, simulating where the curved glass focuses
+    //     light. Derives lightDir2D from the lightAngleRad parameter (the
+    //     shadow block in main() computes the same vector) so it tracks the
+    //     user's light-angle setting. If this is ever re-enabled it needs its
+    //     own `vec2 lightDir2D = vec2(cos(lightAngleRad), -sin(lightAngleRad));`
+    //     since that local now lives in main(), not here.
+    //     `-lightDir2D` because the focal point sits on the same side
+    //     as the light, not the shadow side.
+    /*
+    vec2 focalOffset = -lightDir2D * box_size * 0.15;
+    vec2 fromFocal  = (local_pos - focalOffset) / box_size;
+    float radialDist = length(fromFocal);
+    float focalHighlight = (1.0 - smoothstep(0.0, 0.85, radialDist)) * 0.20;
+    baseColor += vec3(focalHighlight);
+    */
+
+    // lightAngleRad comes in as a parameter (main() computes it once, in the
+    // shadow block) and is reused here for the 3D lighting direction.
+    vec3 lightDir = normalize(vec3(cos(lightAngleRad), sin(lightAngleRad), 0.38));
+    vec3 viewDir = vec3(0.0, 0.0, 1.0);
+    vec3 reflectDir = reflect(-lightDir, normal);
+    float response = 1.0;
+
+    // Create a sharp band for the rim lighting near the edges.
+    // [FIX] Same undefined-behavior ordering issue as insideMask above
+    // (edge0 = rim_width > edge1 = 0.0). Rewritten with increasing edges and
+    // complemented, so it's well-defined on every driver instead of only
+    // "happening to work" with the textbook smoothstep formula.
+    float edgeBand = 1.0 - smoothstep(0.0, rim_width, abs(d));
+    
+    float rimDot = 1.0 - max(dot(normal, viewDir), 0.0);
+    float rimFresnel = pow(max(rimDot, 0.0), max(rim_power, 0.001));
+    float lightMask = pow(abs(dot(normal, lightDir)), max(rim_directional_power, 1.0));
+    
+    // Mix the fresnel effect with the edge mask to keep light strictly on the bevels.
+    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55) * edgeBand;
+    float finalRimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
+    finalRimLight *= response;
+    
+    // [FIX] Previously also multiplied by insideMask here to "mask out
+    // light bleeding past the actual geometry boundary" — but the final
+    // composite (finalRgb = litColor * alpha, alpha = insideMask) already
+    // does that exactly once for the whole litColor (baseColor + all added
+    // light, combined via screen blend below). Multiplying by insideMask
+    // here too caused the same insideMask^2 under-premultiplication as
+    // baseColor above, deepening the dark ring in the antialiased edge band
+    // whenever edge_smoothing is large. No bleeding actually occurs from
+    // removing this: outside the shape insideMask (and therefore the final
+    // alpha) is still 0, so the pixel is still fully transparent regardless
+    // of finalRimLight's magnitude.
+
+    float specularDot = max(dot(reflectDir, viewDir), 0.0);
+    float specularLight = pow(specularDot, max(shininess, 1.0));
+    specularLight *= specular_intensity * response;
+    float specMask = mix(0.25, 1.0, insideMask) * clamp(edgeBand + insideMask * 0.65, 0.0, 1.0);
+    specularLight *= specMask;
+
+    float idleRim = edgeBand * 0.008;
+    // [FIX] Same redundant-insideMask issue as finalRimLight above — removed.
+    // The final `litColor * alpha` composite already applies insideMask once.
+
+    // Background sheen uses 3D surface normal directly (no 2D radial fallback).
+    float sheenFacing = max(dot(normal, lightDir), 0.0);
+    float surfaceSheen = pow(sheenFacing, 1.65);
+    // [FIX] Dropped the extra insideMask factor here too — same
+    // double-premultiplication issue as baseColor/finalRimLight/idleRim
+    // above; the final `litColor * alpha` composite already covers it.
+    surfaceSheen *= mix(1.0, 0.55, edgeBand);
+    vec3 sheenColor = vec3(1.0) * surfaceSheen * sheen_intensity;
+
+    
+    // --- Light Blending Strategy ---
+    
+    // 1. Group all additive lighting components together
+    vec3 addedLight = vec3(specularLight + finalRimLight + idleRim) + sheenColor;
+
+    // 2. Screen Blend Mode (A + B - A*B)
+    // Instead of simply adding lights (which causes intense overexposure and blows out 
+    // white backgrounds), this smoothly limits the maximum brightness to 1.0.
+    vec3 litColor = baseColor + addedLight - (baseColor * addedLight);
+
+    // [CHANGED] 3. Hue-preserving clamp (色相を維持する安全処理)
+    // RGBのいずれかが1.0を超えた場合、白飛びによる色変（黄ばみ等）を防ぐため、
+    // 最も強い色を基準にRGB全体の比率を保ったまま縮小する。
+    float maxChannel = max(litColor.r, max(litColor.g, litColor.b));
+    if (maxChannel > 1.0) {
+        litColor /= maxChannel;
+    }
+    // マイナス値への侵入を防ぐ
+    litColor = max(litColor, 0.0);
+
+    return litColor;
+}
+
 void main() {
     vec2 resolution = vec2(resolution_x, resolution_y);
+
+    // Reference size for the optical constants. Falls back to the render
+    // target's own size when the caller has not supplied one.
+    vec2 refRes = (ref_resolution_x > 0.5 && ref_resolution_y > 0.5)
+        ? vec2(ref_resolution_x, ref_resolution_y)
+        : resolution;
+
     vec2 uv = cogl_tex_coord_in[0].st;
     
     vec2 pixel_coord = uv * resolution;
@@ -278,6 +571,11 @@ void main() {
     float outsideTransition = smoothstep(-edgeFeather, edgeFeather, d);
     float insideMask = 1.0 - outsideTransition;
     float outsideMask = outsideTransition;
+
+    // Coverage of the glass shape at this fragment, and the premultiply factor
+    // for its colour. Declared here (rather than just above the composite) so
+    // the guarded call above can test it.
+    float alpha = insideMask;
 
     // ------------------------------------------------------------------
     // Realistic drop shadow (anchors the glass on light backgrounds).
@@ -428,213 +726,30 @@ void main() {
     //    pure black" look.
     vec3 shadowColor = vec3(0.03, 0.04, 0.08);
 
-    vec4 source = texture2D(cogl_sampler1, uv);
 
-    vec2 gradH = heightGradient(local_pos, box_size, corner_radius, max_z, resolution);
-    vec3 normal = getNormal(gradH);
-
-    vec2 disp = getDisplacement(d, normal, resolution);
-
-    // Dampen the refraction near the exact boundaries to eliminate jagged artifacts.
-    float edgeDampen = smoothstep(0.0, edgeFeather * 3.0, -d);
-    disp *= edgeDampen;
-
-    vec2 refractedUv = stabilizedUV(uv + disp, uv);
-
-    float minRes = max(min(resolution.x, resolution.y), 1.0);
-    vec2 chromaDir = length(disp) > 0.00001 ? normalize(disp) : vec2(0.0);
-    
-    // Calculate Chromatic Aberration vectors (separating RGB channels slightly).
-    vec2 chromaVec = chromaDir * (chroma_strength / minRes) * edgeDampen;
-    vec2 uvR = stabilizedUV(refractedUv + chromaVec, refractedUv);
-    vec2 uvG = refractedUv;
-    vec2 uvB = stabilizedUV(refractedUv - chromaVec, refractedUv);
-
-    // Step 1: RGSS (Rotated Grid Super-Sampling) Pattern Implementation
-    // Instead of sampling in a simple square, sampling in a slanted diamond pattern
-    // provides significantly better anti-aliasing for both horizontal and vertical edges.
-    float edgeProximity = 1.0 - smoothstep(0.0, edgeFeather * 4.0, -d);
-    float aa_spread = mix(0.75, 2.5, edgeProximity);
-    vec2 texel = vec2(aa_spread) / resolution;
-
-    vec2 off1 = vec2( 0.375, -0.125) * texel;
-    vec2 off2 = vec2( 0.125,  0.375) * texel;
-    vec2 off3 = vec2(-0.375,  0.125) * texel;
-    vec2 off4 = vec2(-0.125, -0.375) * texel;
-
-    // Hard limit sampling coordinates to 1.2px inside the texture bounds.
-    // This prevents bilinear filtering from accidentally pulling in black/transparent 
-    // pixels from the void outside the texture space.
-    vec2 margin = vec2(1.2) / resolution;
-    #define SAFE(u) clamp(u, margin, 1.0 - margin)
-
-    // Step 2: Multi-tap Sampling (Averaging 4 sub-pixels to smooth out the image)
-    vec3 refractedRgb = vec3(
-        (texture2D(cogl_sampler1, SAFE(uvR + off1)).r +
-         texture2D(cogl_sampler1, SAFE(uvR + off2)).r +
-         texture2D(cogl_sampler1, SAFE(uvR + off3)).r +
-         texture2D(cogl_sampler1, SAFE(uvR + off4)).r) * 0.25,
-
-        (texture2D(cogl_sampler1, SAFE(uvG + off1)).g +
-         texture2D(cogl_sampler1, SAFE(uvG + off2)).g +
-         texture2D(cogl_sampler1, SAFE(uvG + off3)).g +
-         texture2D(cogl_sampler1, SAFE(uvG + off4)).g) * 0.25,
-
-        (texture2D(cogl_sampler1, SAFE(uvB + off1)).b +
-         texture2D(cogl_sampler1, SAFE(uvB + off2)).b +
-         texture2D(cogl_sampler1, SAFE(uvB + off3)).b +
-         texture2D(cogl_sampler1, SAFE(uvB + off4)).b) * 0.25
-    );
-
-    // Apply color saturation, contrast, brightness
-    vec3 adjustedRefracted = applySCB(refractedRgb, brightness, contrast, saturation); 
-    vec3 refracted = adjustedRefracted;
-
-    vec3 tintColor = vec3(tint_r, tint_g, tint_b);
-    vec3 insideBaseColor = mix(refracted, tintColor, tint_strength);
-
-    // [FIX] Do NOT multiply by insideMask here. insideMask is the same
-    // value used as `alpha` below, and the final composite already
-    // multiplies the fully-lit color by it exactly once
-    // (finalRgb = litColor * alpha), matching Cogl/Clutter's
-    // premultiplied-alpha compositing (out = src.rgb + dst.rgb*(1-src.a)).
+    // ── Skip the glass body where it cannot contribute ──────────────────────
+    // litColor reaches the output only as `litColor * alpha` below, so where
+    // alpha is 0 everything computeLitColor() does — 12 texture fetches for the
+    // RGSS/chroma taps, the height-gradient pow() calls, refraction and the
+    // full lighting chain — is discarded after the fact.
     //
-    // Baking insideMask into baseColor here AS WELL made rgb fall off as
-    // insideMask^2 instead of insideMask^1 across the antialiased edge band
-    // (the +-edge_smoothing px zone where insideMask is fractional, i.e.
-    // exactly where the visible glass boundary sits). An under-premultiplied
-    // color (rgb/alpha < true color) reads as a dark ring right at that
-    // boundary once composited over the background — invisible at small
-    // edge_smoothing (the transition band is only ~1-2px wide, too thin to
-    // notice) but clearly visible once edge_smoothing is turned up, since
-    // the band widens and the darkening becomes visible.
+    // This is worth guarding rather than leaving to the compiler because the
+    // effect's render target is much larger than the glass: most surfaces
+    // render into a full-monitor FBO, so the large majority of fragments are
+    // outside the shape and take the cheap path.
     //
-    // This is independent of shadow_radius/shadow_intensity (radiusEnable
-    // below already zeroes the drop shadow correctly at shadow_radius=0);
-    // the ring persists even with the drop shadow fully disabled, which is
-    // exactly the "Shadow Radius 0, Edge Smoothing >0" symptom reported.
-    vec3 baseColor = insideBaseColor;
-
-    // ------------------------------------------------------------------
-    // Inner depth effects — make the glass look 3D on LIGHT backgrounds
-    // where refraction and rim alone are not visible.
+    // Bit-identical, not an approximation: the skipped branch substitutes
+    // exactly the vec3(0.0) that `litColor * 0.0` would have produced.
     //
-    // A curved glass body has two visual cues that read as "3D" even
-    // when the refracted background is invisible (e.g. on a white wall):
-    //   (a) AMBIENT OCCLUSION near the inside edge — the glass body
-    //       itself blocks light, so the inside edge is darker than
-    //       the center. (This is the "shadow under the glass" the user
-    //       asked about.)
-    //   (b) A FOCAL HIGHLIGHT where light converges through the curved
-    //       surface, biased slightly toward the light source.
-    //
-    // These are baked into the base color BEFORE the screen-blend
-    // lighting pass, so they interact correctly with the rim / sheen
-    // / specular that follow.
-    // ------------------------------------------------------------------
-
-    // (a) Inner shadow: dark band just inside the glass edge.
-    //     aoMask = 1 at d=0 (right at the edge), fading to 0 at
-    //     d = -ao_radius (ao_radius px inward from the edge).
-    //     Strength is controlled independently by ao_intensity (0-1).
-    //     [CHANGED] Previously this reused rim_width for its falloff
-    //     distance and was multiplied by the drop shadow's radiusEnable
-    //     (so it silently disappeared whenever shadow_radius was 0). Both
-    //     couplings are removed here so the inner AO darkening has its own
-    //     independent radius/intensity controls, matching the outer drop
-    //     shadow's separate radius/intensity pair.
-    float aoMask = 1.0 - smoothstep(0.0, max(ao_radius, 0.001), -d);
-    baseColor *= (1.0 - aoMask * ao_intensity);
-
-    // (b) Center focal highlight: bright spot offset slightly toward
-    //     the light source, simulating where the curved glass focuses
-    //     light. Uses lightDir2D (computed in the shadow block earlier
-    //     in main()) so it tracks the user's light-angle setting.
-    //     `-lightDir2D` because the focal point sits on the same side
-    //     as the light, not the shadow side.
-    /*
-    vec2 focalOffset = -lightDir2D * box_size * 0.15;
-    vec2 fromFocal  = (local_pos - focalOffset) / box_size;
-    float radialDist = length(fromFocal);
-    float focalHighlight = (1.0 - smoothstep(0.0, 0.85, radialDist)) * 0.20;
-    baseColor += vec3(focalHighlight);
-    */
-
-    // lightAngleRad was declared earlier in main() (in the shadow block) and
-    // is reused here for the 3D lighting direction.
-    vec3 lightDir = normalize(vec3(cos(lightAngleRad), sin(lightAngleRad), 0.38));
-    vec3 viewDir = vec3(0.0, 0.0, 1.0);
-    vec3 reflectDir = reflect(-lightDir, normal);
-    float response = 1.0;
-
-    // Create a sharp band for the rim lighting near the edges.
-    // [FIX] Same undefined-behavior ordering issue as insideMask above
-    // (edge0 = rim_width > edge1 = 0.0). Rewritten with increasing edges and
-    // complemented, so it's well-defined on every driver instead of only
-    // "happening to work" with the textbook smoothstep formula.
-    float edgeBand = 1.0 - smoothstep(0.0, rim_width, abs(d));
-    
-    float rimDot = 1.0 - max(dot(normal, viewDir), 0.0);
-    float rimFresnel = pow(max(rimDot, 0.0), max(rim_power, 0.001));
-    float lightMask = pow(abs(dot(normal, lightDir)), max(rim_directional_power, 1.0));
-    
-    // Mix the fresnel effect with the edge mask to keep light strictly on the bevels.
-    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55) * edgeBand;
-    float finalRimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
-    finalRimLight *= response;
-    
-    // [FIX] Previously also multiplied by insideMask here to "mask out
-    // light bleeding past the actual geometry boundary" — but the final
-    // composite (finalRgb = litColor * alpha, alpha = insideMask) already
-    // does that exactly once for the whole litColor (baseColor + all added
-    // light, combined via screen blend below). Multiplying by insideMask
-    // here too caused the same insideMask^2 under-premultiplication as
-    // baseColor above, deepening the dark ring in the antialiased edge band
-    // whenever edge_smoothing is large. No bleeding actually occurs from
-    // removing this: outside the shape insideMask (and therefore the final
-    // alpha) is still 0, so the pixel is still fully transparent regardless
-    // of finalRimLight's magnitude.
-
-    float specularDot = max(dot(reflectDir, viewDir), 0.0);
-    float specularLight = pow(specularDot, max(shininess, 1.0));
-    specularLight *= specular_intensity * response;
-    float specMask = mix(0.25, 1.0, insideMask) * clamp(edgeBand + insideMask * 0.65, 0.0, 1.0);
-    specularLight *= specMask;
-
-    float idleRim = edgeBand * 0.008;
-    // [FIX] Same redundant-insideMask issue as finalRimLight above — removed.
-    // The final `litColor * alpha` composite already applies insideMask once.
-
-    // Background sheen uses 3D surface normal directly (no 2D radial fallback).
-    float sheenFacing = max(dot(normal, lightDir), 0.0);
-    float surfaceSheen = pow(sheenFacing, 1.65);
-    // [FIX] Dropped the extra insideMask factor here too — same
-    // double-premultiplication issue as baseColor/finalRimLight/idleRim
-    // above; the final `litColor * alpha` composite already covers it.
-    surfaceSheen *= mix(1.0, 0.55, edgeBand);
-    vec3 sheenColor = vec3(1.0) * surfaceSheen * sheen_intensity;
-
-    float alpha = insideMask;
-    
-    // --- Light Blending Strategy ---
-    
-    // 1. Group all additive lighting components together
-    vec3 addedLight = vec3(specularLight + finalRimLight + idleRim) + sheenColor;
-
-    // 2. Screen Blend Mode (A + B - A*B)
-    // Instead of simply adding lights (which causes intense overexposure and blows out 
-    // white backgrounds), this smoothly limits the maximum brightness to 1.0.
-    vec3 litColor = baseColor + addedLight - (baseColor * addedLight);
-
-    // [CHANGED] 3. Hue-preserving clamp (色相を維持する安全処理)
-    // RGBのいずれかが1.0を超えた場合、白飛びによる色変（黄ばみ等）を防ぐため、
-    // 最も強い色を基準にRGB全体の比率を保ったまま縮小する。
-    float maxChannel = max(litColor.r, max(litColor.g, litColor.b));
-    if (maxChannel > 1.0) {
-        litColor /= maxChannel;
+    // Written as an `if` rather than `discard` or an early `return` because the
+    // shader is spliced into Cogl's generated main() via Snippet.set_replace(),
+    // so returning here would also skip whatever Cogl appends after it. The
+    // shadow term below still needs to run for fragments outside the glass.
+    vec3 litColor = vec3(0.0);
+    if (alpha > 0.0) {
+        litColor = computeLitColor(uv, resolution, refRes, local_pos, box_size,
+                                   d, edgeFeather, insideMask, lightAngleRad);
     }
-    // マイナス値への侵入を防ぐ
-    litColor = max(litColor, 0.0);
 
     // Composite the glass OVER the shadow, in PREMULTIPLIED-alpha space.
     //

@@ -1,4 +1,3 @@
-import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
@@ -24,11 +23,25 @@ function _srgbToLinear(c: number): number {
   return Math.pow((n + 0.055) / 1.055, 2.4);
 }
 
+/**
+ * sRGB -> linear for every possible channel byte.
+ *
+ * The inputs are always integers in 0..255, so the transfer function has only
+ * 256 possible results. Computing it per channel per pixel meant three
+ * Math.pow() calls for every sampled pixel — the dominant cost of a sample
+ * pass. The table is exact, not an approximation: it stores the same values
+ * _srgbToLinear() returns.
+ */
+const _SRGB_TO_LINEAR: Float64Array = (() => {
+  const table = new Float64Array(256);
+  for (let i = 0; i < 256; i++) table[i] = _srgbToLinear(i);
+  return table;
+})();
+
 function _luminanceFromRgb(r: number, g: number, b: number): number {
-  const rl = _srgbToLinear(r);
-  const gl = _srgbToLinear(g);
-  const bl = _srgbToLinear(b);
-  return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl;
+  return 0.2126 * _SRGB_TO_LINEAR[r]
+    + 0.7152 * _SRGB_TO_LINEAR[g]
+    + 0.0722 * _SRGB_TO_LINEAR[b];
 }
 
 function _trimmedMean(values: number[], trimRatio: number = 0.1): number | null {
@@ -45,6 +58,32 @@ function _trimmedMean(values: number[], trimRatio: number = 0.1): number | null 
     sum += sorted[i];
 
   return sum / (end - start);
+}
+
+/**
+ * Target number of samples along each axis of a measured region.
+ *
+ * The luminance estimate feeds a light/dark text decision with a hysteresis
+ * band around it, so a few thousand samples is far more than enough; the extra
+ * precision from reading every pixel changes nothing about the outcome.
+ */
+const SAMPLES_PER_AXIS = 48;
+
+/**
+ * Per-axis sampling stride for a region.
+ *
+ * Previously a single stride derived from the *smaller* dimension:
+ * `max(1, floor(min(w, h) / 48))`. For anything long and thin — the top panel
+ * band being the obvious case, at roughly 1920x40 — the short side drives the
+ * divisor to 0, the stride clamps to 1, and the loop walks every one of the
+ * ~77k pixels instead of the intended ~2.3k. Computing the axes independently
+ * keeps the sample count near the target whatever the aspect ratio.
+ */
+function _strides(width: number, height: number): [number, number] {
+  return [
+    Math.max(1, Math.floor(width / SAMPLES_PER_AXIS)),
+    Math.max(1, Math.floor(height / SAMPLES_PER_AXIS)),
+  ];
 }
 
 function _getActorRect(actor: Clutter.Actor): { x: number, y: number, width: number, height: number } | null {
@@ -92,44 +131,53 @@ function _mergeRects(rects: { x: number, y: number, width: number, height: numbe
   };
 }
 
-async function _captureAreaToFile(screenshot: Shell.Screenshot, rect: { x: number, y: number, width: number, height: number }, filePath: string): Promise<boolean> {
-  return new Promise((resolve: (success: boolean) => void) => {
+
+/**
+ * Captures a screen region and decodes it, without touching the filesystem.
+ *
+ * The previous path wrote a PNG to /tmp and immediately read it back to decode
+ * it. That is a full write/read round trip through the filesystem, on a repeat
+ * timer, for a buffer that is thrown away microseconds later — and on an idle
+ * desktop the panel's sampler alone did it once a second, forever.
+ *
+ * Capturing into a memory stream keeps the PNG encode (Shell.Screenshot only
+ * writes PNG) but drops the disk I/O and the unlink.
+ */
+async function _captureAreaToPixbuf(
+  screenshot: Shell.Screenshot,
+  rect: { x: number, y: number, width: number, height: number }
+): Promise<GdkPixbuf.Pixbuf | null> {
+  return new Promise((resolve: (pixbuf: GdkPixbuf.Pixbuf | null) => void) => {
     try {
-      // 1. 文字列のパスから Gio.File オブジェクトを生成
-      const file = Gio.File.new_for_path(filePath) as Gio.File;
+      const stream = Gio.MemoryOutputStream.new_resizable();
 
-      // 2. 上書きモードで書き込み用ストリーム (GOutputStream) を開く
-      const stream = file.replace(null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
-
-      // 3. パス文字列の代わりに、作成した stream を引数に渡す
       screenshot.screenshot_area(
         rect.x, rect.y, rect.width, rect.height, stream,
         (obj, res) => {
           try {
-            if (!obj) {
-              throw new Error("Screenshot object is null");
-            }
-            // スクリーンショット処理の完了を待機
-            const success = obj.screenshot_area_finish(res)[0];
+            if (!obj) throw new Error('Screenshot object is null');
 
-            // ファイルがロックされたままになるのを防ぐためストリームを閉じる
+            const success = obj.screenshot_area_finish(res)[0];
+            // Must close before stealing: the PNG encoder may still be
+            // buffering, and steal_as_bytes() on an open stream can truncate.
             stream.close(null);
-            resolve(success);
+            if (!success) { resolve(null); return; }
+
+            const bytes = stream.steal_as_bytes();
+            const input = Gio.MemoryInputStream.new_from_bytes(bytes);
+            const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(input, null);
+            input.close(null);
+            resolve(pixbuf ?? null);
           } catch (e) {
-            stream.close(null); // エラー時も確実に閉じる
-            resolve(false);
+            try { stream.close(null); } catch (_) { }
+            resolve(null);
           }
         }
       );
     } catch (e) {
-      resolve(false);
+      resolve(null);
     }
   });
-}
-
-function _buildTempPath(): string {
-  const token = `${GLib.get_monotonic_time()}-${Math.floor(Math.random() * 1000000)}`;
-  return `${GLib.get_tmp_dir()}/liquid-glass-sample-${token}.png`;
 }
 
 export class StageContrastSampler {
@@ -143,16 +191,11 @@ export class StageContrastSampler {
     if (!rect || rect.width <= 0 || rect.height <= 0)
       return null;
 
-    const filePath = _buildTempPath();
-    const captured = await _captureAreaToFile(this._screenshot, rect, filePath);
-    if (!captured)
+    const pixbuf = await _captureAreaToPixbuf(this._screenshot, rect);
+    if (!pixbuf)
       return null;
 
     try {
-      const pixbuf = GdkPixbuf.Pixbuf.new_from_file(filePath);
-      if (!pixbuf)
-        return null;
-
       const width = pixbuf.get_width();
       const height = pixbuf.get_height();
       const rowstride = pixbuf.get_rowstride();
@@ -160,11 +203,11 @@ export class StageContrastSampler {
       const hasAlpha = pixbuf.get_has_alpha();
       const pixels = pixbuf.get_pixels();
 
-      const step = Math.max(1, Math.floor(Math.min(width, height) / 48));
+      const [stepX, stepY] = _strides(width, height);
       const values: number[] = [];
 
-      for (let y = 0; y < height; y += step) {
-        for (let x = 0; x < width; x += step) {
+      for (let y = 0; y < height; y += stepY) {
+        for (let x = 0; x < width; x += stepX) {
           const idx = y * rowstride + x * channels;
           if (hasAlpha) {
             const a = pixels[idx + 3];
@@ -191,25 +234,18 @@ export class StageContrastSampler {
       return _trimmedMean(values, 0.10);
     } catch (e) {
       return null;
-    } finally {
-      try {
-        GLib.unlink(filePath);
-      } catch (_) {
-        // Ignore cleanup errors.
-      }
     }
   }
 
   /**
    * Measures several regions from a SINGLE screen capture.
    *
-   * `sampleLuminance` takes one screenshot, writes it to a PNG in the temp dir
-   * and decodes it again — so measuring N regions with it costs N of those
-   * round trips, serialized. A popup can easily hold 150 text actors (a
-   * calendar alone has 42 day cells), which makes per-region colouring
-   * unaffordable that way. Here the union is captured once and every sub-rect
-   * is read out of that one decoded pixbuf, so the cost no longer depends on
-   * how many regions are asked for.
+   * `sampleLuminance` takes one screenshot and decodes it — so measuring N
+   * regions with it costs N captures, serialized. A popup can easily hold 150
+   * text actors (a calendar alone has 42 day cells), which makes per-region
+   * colouring unaffordable that way. Here the union is captured once and every
+   * sub-rect is read out of that one decoded pixbuf, so the cost no longer
+   * depends on how many regions are asked for.
    *
    * `subRects` are in the same absolute screen coordinates as `union`; any that
    * fall outside it, or that hold no usable pixels, come back as null.
@@ -222,16 +258,11 @@ export class StageContrastSampler {
     if (!union || union.width <= 0 || union.height <= 0 || subRects.length === 0)
       return out;
 
-    const filePath = _buildTempPath();
-    const captured = await _captureAreaToFile(this._screenshot, union, filePath);
-    if (!captured)
+    const pixbuf = await _captureAreaToPixbuf(this._screenshot, union);
+    if (!pixbuf)
       return out;
 
     try {
-      const pixbuf = GdkPixbuf.Pixbuf.new_from_file(filePath);
-      if (!pixbuf)
-        return out;
-
       const width = pixbuf.get_width();
       const height = pixbuf.get_height();
       const rowstride = pixbuf.get_rowstride();
@@ -253,11 +284,11 @@ export class StageContrastSampler {
         const x1 = _clamp(Math.ceil((r.x - union.x + r.width) * sx), x0 + 1, width);
         const y1 = _clamp(Math.ceil((r.y - union.y + r.height) * sy), y0 + 1, height);
 
-        const step = Math.max(1, Math.floor(Math.min(x1 - x0, y1 - y0) / 48));
+        const [stepX, stepY] = _strides(x1 - x0, y1 - y0);
         const values: number[] = [];
 
-        for (let y = y0; y < y1; y += step) {
-          for (let x = x0; x < x1; x += step) {
+        for (let y = y0; y < y1; y += stepY) {
+          for (let x = x0; x < x1; x += stepX) {
             const idx = y * rowstride + x * channels;
             if (hasAlpha) {
               const a = pixels[idx + 3];
@@ -284,12 +315,6 @@ export class StageContrastSampler {
       return out;
     } catch (e) {
       return out;
-    } finally {
-      try {
-        GLib.unlink(filePath);
-      } catch (_) {
-        // Ignore cleanup errors.
-      }
     }
   }
 

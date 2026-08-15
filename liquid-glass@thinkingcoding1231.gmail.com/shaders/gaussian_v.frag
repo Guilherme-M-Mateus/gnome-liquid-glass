@@ -1,3 +1,12 @@
+// NOTE: reference only — this file is not loaded at runtime.
+//
+// The separable Gaussian is generated in TypeScript instead, by
+// LiquidEffect._buildGaussianSnippet(), because the tap count has to follow the
+// blur radius: the kernel is fully unrolled with its offsets and weights baked
+// in as constants, and recompiled whenever the radius changes the tap count.
+// A fixed-kernel file cannot do that. Kept because it documents the linear-
+// sampling scheme the generator implements.
+//
 // shaders/gaussian_v.frag
 // 分離型 Gaussian Blur — 垂直方向パス (Vertical Pass) — Cogl snippet source
 //

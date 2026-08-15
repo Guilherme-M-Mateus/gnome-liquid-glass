@@ -321,6 +321,18 @@ export class UILayerSampler {
     // Both are needed on destroy to release exactly what we registered on the
     // (possibly shared) SelfExcludingSnapshotCapture.
     _delayedCaptureOwners = new Map();
+    // ── Change tracking ────────────────────────────────────────────────────────
+    // refresh() rescans all of uiGroup and reconciles the clone set. Its result
+    // is a pure function of (a) which actors are children of uiGroup and (b)
+    // whether each is visible and mapped — none of which changes on most frames.
+    // Callers previously ran it every frame; these signals let refreshIfDirty()
+    // skip the scan until something actually moves.
+    //
+    // Watching visibility as well as membership matters: a child that is hidden
+    // in place, rather than removed, still has to drop its clone.
+    _dirty = true;
+    _uiGroupSignals = [];
+    _watched = new Map();
     constructor(selfActor, container, extraExclusions = [], cloneContainer = null) {
         this._selfActor = selfActor;
         this._container = container;
@@ -338,6 +350,65 @@ export class UILayerSampler {
         else {
             this._container.add_child(this._uiClonesContainer);
         }
+        this._startWatchingUiGroup();
+    }
+    // ─── Change tracking ─────────────────────────────────────────────────────
+    _startWatchingUiGroup() {
+        const uiGroup = Main.layoutManager.uiGroup;
+        this._uiGroupSignals.push(uiGroup.connect('child-added', (_g, child) => {
+            this._watchChild(child);
+            this._dirty = true;
+        }));
+        this._uiGroupSignals.push(uiGroup.connect('child-removed', (_g, child) => {
+            this._unwatchChild(child);
+            this._dirty = true;
+        }));
+        for (const child of uiGroup.get_children())
+            this._watchChild(child);
+    }
+    /**
+     * Watches one uiGroup child for the properties refresh() reads.
+     *
+     * Every child is watched, not just the cloned ones: a child that refresh()
+     * currently skips because it is hidden has to mark the sampler dirty when it
+     * becomes visible, which is precisely the case where it is not in _clones.
+     */
+    _watchChild(child) {
+        if (this._watched.has(child))
+            return;
+        const mark = () => { this._dirty = true; };
+        this._watched.set(child, [
+            child.connect('notify::visible', mark),
+            child.connect('notify::mapped', mark),
+        ]);
+    }
+    _unwatchChild(child) {
+        const ids = this._watched.get(child);
+        if (!ids)
+            return;
+        this._watched.delete(child);
+        for (const id of ids) {
+            try {
+                child.disconnect(id);
+            }
+            catch (_) { }
+        }
+    }
+    /**
+     * Forces the next refreshIfDirty() to rescan.
+     *
+     * For callers that change something refresh() depends on but that no watched
+     * signal reports — adding an exclusion, for instance.
+     */
+    markDirty() {
+        this._dirty = true;
+    }
+    /** Runs refresh() only if the UI layer changed since the last scan. */
+    refreshIfDirty() {
+        if (!this._dirty)
+            return;
+        this._dirty = false;
+        this.refresh();
     }
     _findUiGroupAncestor(actor) {
         const uiGroup = Main.layoutManager.uiGroup;
@@ -354,6 +425,8 @@ export class UILayerSampler {
         if (!actor)
             return;
         this._extraExclusions.add(actor);
+        // refresh() reads the exclusion set, so its result is now stale.
+        this._dirty = true;
     }
     /**
      * Resolves the Blur My Shell panel-blur target actor via
@@ -793,6 +866,16 @@ export class UILayerSampler {
         }
     }
     destroy() {
+        const uiGroup = Main.layoutManager.uiGroup;
+        for (const id of this._uiGroupSignals) {
+            try {
+                uiGroup.disconnect(id);
+            }
+            catch (_) { }
+        }
+        this._uiGroupSignals = [];
+        for (const child of [...this._watched.keys()])
+            this._unwatchChild(child);
         if (this._uiClonesContainer) {
             try {
                 this._uiClonesContainer.destroy();
@@ -884,29 +967,57 @@ export class WindowCloneManager {
                 continue;
             activeWindows.add(w);
             let clone;
+            let isNew = false;
             if (!this._windowClones.has(w)) {
                 clone = new UnpickableClone({ source: w });
                 this.windowClonesContainer?.add_child(clone);
                 this._windowClones.set(w, clone);
+                isNew = true;
             }
             else {
                 clone = this._windowClones.get(w);
             }
-            clone.remove_transition('position');
-            clone.remove_transition('size');
-            clone.set_position(w.x, w.y);
-            clone.set_size(width, height);
-            clone.remove_transition('scale-x');
-            clone.remove_transition('scale-y');
-            clone.set_scale(w.scale_x, w.scale_y);
+            // Every write below invalidates the clone's paint state and queues a
+            // relayout, and this runs for every window, on every frame, for every
+            // glass surface on screen. On a still desktop none of these values
+            // change, so the previous values are cached on the clone and the writes
+            // are skipped when they would be no-ops. Reads of `w` stay unconditional
+            // — they are cheap property gets.
+            const prev = clone._lgLast;
+            const tx = w.translation_x, ty = w.translation_y;
+            const sx = w.scale_x, sy = w.scale_y;
+            const pX = w.pivot_point ? w.pivot_point.x : 0;
+            const pY = w.pivot_point ? w.pivot_point.y : 0;
+            if (isNew || !prev ||
+                prev.x !== w.x || prev.y !== w.y || prev.w !== width || prev.h !== height) {
+                clone.remove_transition('position');
+                clone.remove_transition('size');
+                clone.set_position(w.x, w.y);
+                clone.set_size(width, height);
+            }
+            if (isNew || !prev || prev.sx !== sx || prev.sy !== sy) {
+                clone.remove_transition('scale-x');
+                clone.remove_transition('scale-y');
+                clone.set_scale(sx, sy);
+            }
             // Copy translation directly too, so animation interpolation is
             // reflected immediately rather than lagging a frame behind.
-            clone.translation_x = w.translation_x;
-            clone.translation_y = w.translation_y;
-            let pX = w.pivot_point ? w.pivot_point.x : 0;
-            let pY = w.pivot_point ? w.pivot_point.y : 0;
-            clone.set_pivot_point(pX, pY);
-            this.windowClonesContainer?.set_child_at_index(clone, zIndex);
+            if (isNew || !prev || prev.tx !== tx || prev.ty !== ty) {
+                clone.translation_x = tx;
+                clone.translation_y = ty;
+            }
+            if (isNew || !prev || prev.pX !== pX || prev.pY !== pY) {
+                clone.set_pivot_point(pX, pY);
+            }
+            // Restacking re-sorts the container's child list, so only do it when this
+            // clone is not already at the index it belongs at.
+            if (isNew || !prev || prev.z !== zIndex) {
+                this.windowClonesContainer?.set_child_at_index(clone, zIndex);
+            }
+            clone._lgLast = {
+                x: w.x, y: w.y, w: width, h: height,
+                sx, sy, tx, ty, pX, pY, z: zIndex,
+            };
             zIndex++;
         }
         // Remove clones for windows that closed, or all of them when the

@@ -23,6 +23,17 @@ export class Logger {
     });
   }
 
+  /**
+   * Whether anything logged would actually be printed.
+   *
+   * The methods below already drop everything when logging is off, but the
+   * caller has still paid to build the message. Hot paths that interpolate
+   * strings (or walk a collection to describe it) should test this first.
+   */
+  get enabled(): boolean {
+    return this._outputLogs;
+  }
+
   log(...args: any[]) {
     if (!this._outputLogs) return;
     console.log(...args);

@@ -139,6 +139,10 @@ export class AdaptiveTextController {
     _firstRun = true;
     /** Original inline style per actor, so teardown restores exactly. */
     _styled = new Map();
+    // Actors currently mid-colour-transition, driven by one shared timer rather
+    // than a timer each. See _animateColor().
+    _tweens = new Map();
+    _tweenTimerId = 0;
     /** Last decision per group key, giving the deadband something to hold. */
     _usesDarkText = new Map();
     constructor(opts) {
@@ -218,8 +222,13 @@ export class AdaptiveTextController {
         try {
             // One capture for every region, however many there are.
             const lumas = await this._sampler.sampleLuminanceRegions(union, usable.map(u => u.rect));
-            this._opts.logger.log(`[Liquid Glass] adaptive: 1 capture -> ${usable.length} regions ` +
-                `(${usable.reduce((n, u) => n + u.group.targets.length, 0)} actors)`);
+            // Guarded rather than left to logger.log(): the message walks every
+            // region to total up its actors, and this runs on the sample timer for
+            // as long as the surface is visible.
+            if (this._opts.logger.enabled) {
+                this._opts.logger.log(`[Liquid Glass] adaptive: 1 capture -> ${usable.length} regions ` +
+                    `(${usable.reduce((n, u) => n + u.group.targets.length, 0)} actors)`);
+            }
             const threshold = this._config.luminanceThreshold;
             for (let i = 0; i < usable.length; i++) {
                 const luma = lumas[i];
@@ -237,9 +246,13 @@ export class AdaptiveTextController {
                 else
                     useDark = prev;
                 this._usesDarkText.set(group.key, useDark);
-                this._opts.logger.log(`[Liquid Glass]   region ${describeActor(group.key)} ` +
-                    `n=${group.targets.length} luma=${luma.toFixed(4)} ` +
-                    `-> ${useDark ? 'DARK' : 'LIGHT'} text`);
+                // describeActor() inspects the actor to build its label, so this is
+                // guarded too — it runs once per region per sample tick.
+                if (this._opts.logger.enabled) {
+                    this._opts.logger.log(`[Liquid Glass]   region ${describeActor(group.key)} ` +
+                        `n=${group.targets.length} luma=${luma.toFixed(4)} ` +
+                        `-> ${useDark ? 'DARK' : 'LIGHT'} text`);
+                }
                 const color = useDark ? this._config.darkTextColor : this._config.lightTextColor;
                 for (const actor of group.targets)
                     this._setActorColor(actor, color, skipAnim);
@@ -254,15 +267,14 @@ export class AdaptiveTextController {
     }
     /** Restores every style we overwrote and forgets all decisions. */
     clear() {
+        // One timer covers every in-flight actor, so it is stopped once here
+        // rather than per actor in the loop below.
+        this._stopTweens();
         for (const [raw, style] of this._styled.entries()) {
             const actor = raw;
             if (!actor || typeof actor.set_style !== 'function')
                 continue;
             try {
-                if (actor._lgColorTweenId) {
-                    GLib.source_remove(actor._lgColorTweenId);
-                    actor._lgColorTweenId = undefined;
-                }
                 actor._lgTargetColor = undefined;
                 actor.set_style(style === '' ? null : style);
             }
@@ -304,24 +316,32 @@ export class AdaptiveTextController {
         actor._lgTargetColor = color;
         this._animateColor(actor, color, skipAnimation);
     }
-    _animateColor(actor, targetHex, skipAnimation) {
-        if (actor._lgColorTweenId) {
-            GLib.source_remove(actor._lgColorTweenId);
-            actor._lgColorTweenId = undefined;
-        }
+    _paint(actor, hex) {
         const base = this._styled.get(actor) ?? '';
+        try {
+            actor.set_style(`${base} color: ${hex}; -st-icon-foreground-color: ${hex};`);
+            return true;
+        }
+        catch (_) {
+            return false;
+        }
+    }
+    /**
+     * Queues one actor onto the shared colour tween.
+     *
+     * This used to arm a 16 ms GLib timeout *per actor*. A backdrop flip retints
+     * every text actor in the surface at once, and a calendar popup holds on the
+     * order of 150 of them — so the transition ran ~150 concurrent 60 Hz timers
+     * for its whole 380 ms, each waking the main loop separately to write one
+     * inline style. One timer now drives every in-flight actor, which collapses
+     * the wakeups to one per frame; the styles written, and therefore the
+     * colours shown, are unchanged.
+     */
+    _animateColor(actor, targetHex, skipAnimation) {
         const target = hexToRgb(targetHex);
-        const paint = (hex) => {
-            try {
-                actor.set_style(`${base} color: ${hex}; -st-icon-foreground-color: ${hex};`);
-                return true;
-            }
-            catch (_) {
-                return false;
-            }
-        };
         if (skipAnimation) {
-            paint(rgbToHex(target.r, target.g, target.b));
+            this._tweens.delete(actor);
+            this._paint(actor, rgbToHex(target.r, target.g, target.b));
             return;
         }
         let start;
@@ -329,23 +349,46 @@ export class AdaptiveTextController {
             start = actor.get_theme_node().get_foreground_color();
         }
         catch (_) {
-            paint(rgbToHex(target.r, target.g, target.b));
+            this._tweens.delete(actor);
+            this._paint(actor, rgbToHex(target.r, target.g, target.b));
             return;
         }
-        const startTime = GLib.get_monotonic_time();
-        actor._lgColorTweenId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
-            const elapsedMs = (GLib.get_monotonic_time() - startTime) / 1000;
-            const t = Math.min(elapsedMs / COLOR_TWEEN_MS, 1.0);
-            const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-            const r = Math.round(start.red + (target.r - start.red) * ease);
-            const g = Math.round(start.green + (target.g - start.green) * ease);
-            const b = Math.round(start.blue + (target.b - start.blue) * ease);
-            if (!paint(rgbToHex(r, g, b)) || t >= 1.0) {
-                actor._lgColorTweenId = undefined;
+        // Re-targeting mid-tween replaces the entry, so the actor animates from
+        // wherever the theme node currently reports rather than snapping.
+        this._tweens.set(actor, { start, target, startTime: GLib.get_monotonic_time() });
+        this._startTweenDriver();
+    }
+    _startTweenDriver() {
+        if (this._tweenTimerId !== 0)
+            return;
+        this._tweenTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
+            const now = GLib.get_monotonic_time();
+            for (const [actor, tween] of [...this._tweens]) {
+                const elapsedMs = (now - tween.startTime) / 1000;
+                const t = Math.min(elapsedMs / COLOR_TWEEN_MS, 1.0);
+                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                const r = Math.round(tween.start.red + (tween.target.r - tween.start.red) * ease);
+                const g = Math.round(tween.start.green + (tween.target.g - tween.start.green) * ease);
+                const b = Math.round(tween.start.blue + (tween.target.b - tween.start.blue) * ease);
+                // Drop the actor when it finishes, or when painting fails because it
+                // has gone away.
+                if (!this._paint(actor, rgbToHex(r, g, b)) || t >= 1.0)
+                    this._tweens.delete(actor);
+            }
+            if (this._tweens.size === 0) {
+                this._tweenTimerId = 0;
                 return GLib.SOURCE_REMOVE;
             }
             return GLib.SOURCE_CONTINUE;
         });
+    }
+    /** Stops the shared tween and forgets every in-flight actor. */
+    _stopTweens() {
+        if (this._tweenTimerId !== 0) {
+            GLib.source_remove(this._tweenTimerId);
+            this._tweenTimerId = 0;
+        }
+        this._tweens.clear();
     }
 }
 /** Short human label for a group key, for the debug log only. */
