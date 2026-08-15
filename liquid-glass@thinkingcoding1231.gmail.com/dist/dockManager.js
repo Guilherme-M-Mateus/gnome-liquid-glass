@@ -2,8 +2,7 @@
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
-import { LiquidEffect } from './liquidEffect.js';
-import { UnpickableActor, UILayerSampler, WindowCloneManager } from './utils.js';
+import { GlassLayer } from './glassSurface.js';
 // Padding to allow the shader to draw effects (like refraction and blur) outside the actor's strict bounds.
 const SHADER_PADDING = 20;
 // Utility: Convert HEX color string (e.g., "#ffffff") to normalized RGB array [1.0, 1.0, 1.0]
@@ -55,6 +54,7 @@ export class DashManager {
     _outputLogs = false;
     _marginValue = 0;
     _uiSampler = null;
+    layer = null;
     _windowCloneManager = null;
     _logger;
     // コンストラクタに settings を追加
@@ -197,28 +197,6 @@ export class DashManager {
         if (this._dockParent) {
             this._dockParent.add_style_class_name('liquid-glass-transparent');
         }
-        this.bgActor = new UnpickableActor();
-        this.bgActor.set_name('liquid-glass-bg-actor');
-        this.bgActor.set_size(1.0, 1.0);
-        // liquidBox: full-monitor-sized actor that holds the LiquidEffect.
-        // LiquidEffect internally runs dual-Kawase blur passes before the glass composite,
-        // so no separate blurBox/Shell.BlurEffect is needed.
-        this.liquidBox = new UnpickableActor();
-        this.liquidBox.set_name("liquid-box");
-        this.liquidBox.set_clip_to_allocation(true);
-        this.bgActor.add_child(this.liquidBox);
-        // dummyBreaker: dummy actor to break the BMS bug
-        let dummyBreaker = new UnpickableActor();
-        dummyBreaker.set_name("optimization-breaker");
-        dummyBreaker.set_size(1.0, 1.0);
-        dummyBreaker.set_opacity(0); // 完全に透明
-        this.liquidBox.add_child(dummyBreaker);
-        // _cloneContainer lives inside liquidBox.
-        // Clones are captured into the LiquidEffect's OffscreenEffect FBO and
-        // blurred + distorted by the shader in a single pass.
-        this._cloneContainer = new UnpickableActor();
-        this._cloneContainer.set_name("clone-container");
-        this.liquidBox.add_child(this._cloneContainer);
         // 動的マージンを適用
         this._applyMargin();
         this._marginValue = this._settings.get_int('dock-margin-bottom');
@@ -231,35 +209,23 @@ export class DashManager {
                 break;
             dockRoot = p;
         }
-        if (dockRoot && dockRoot.get_parent() === Main.layoutManager.uiGroup) {
-            Main.layoutManager.uiGroup.insert_child_below(this.bgActor, dockRoot);
-        }
-        else {
-            Main.layoutManager.uiGroup.add_child(this.bgActor);
-        }
-        // 設定から初期値を読み込み
-        let blurRadius = this._settings.get_int('dock-blur-radius');
-        let tintColorStr = this._settings.get_string('dock-tint-color');
-        let tintStrength = this._settings.get_double('dock-tint-strength');
-        let cornerRadius = this._settings.get_double('dock-corner-radius');
-        let brightness = this._settings.get_double('dock-brightness');
-        let contrast = this._settings.get_double('dock-contrast');
-        let saturation = this._settings.get_double('dock-saturation');
-        this.effect = new LiquidEffect({ extensionPath: this.extensionPath, settings: this._settings, logger: this._logger });
-        this.effect.setPadding(SHADER_PADDING);
-        this.effect.setTintColor(...hexToColorArray(tintColorStr));
-        this.effect.setTintStrength(tintStrength);
-        this.effect.setCornerRadius(cornerRadius);
-        this.effect.setBrightness(brightness);
-        this.effect.setContrast(contrast);
-        this.effect.setSaturation(saturation);
-        this.effect.setBlurRadius(blurRadius);
-        this.effect.setIsDock(true);
-        this.liquidBox.add_effect(this.effect);
-        // WindowCloneManager + UILayerSampler deposit their clones inside liquidBox.
-        this._windowCloneManager = new WindowCloneManager(this.liquidBox, this._cloneContainer);
-        this._uiSampler = new UILayerSampler(this.bgActor, this.liquidBox, [dockRoot, global.windowGroup, global.window_group], this._cloneContainer);
-        this.bgActor.show();
+        // Actor tree, shader and clone samplers — all shared, see glassSurface.ts.
+        // isDock keeps the feathered edge off the dock's own background actor.
+        this.layer = new GlassLayer({
+            extensionPath: this.extensionPath,
+            settings: this._settings,
+            logger: this._logger,
+            keyPrefix: 'dock',
+            root: dockRoot,
+            isDock: true,
+        });
+        this.bgActor = this.layer.bgActor;
+        this.liquidBox = this.layer.liquidBox;
+        this._cloneContainer = this.layer.cloneContainer;
+        this.effect = this.layer.effect;
+        this._windowCloneManager = this.layer.windowClones;
+        this._uiSampler = this.layer.uiSampler;
+        this.layer.show();
         const laterAdd = (laterType, callback) => {
             return global.compositor.get_laters().add(laterType, callback);
         };
@@ -736,19 +702,14 @@ export class DashManager {
             }
             this._frameSyncId = 0;
         }
-        if (this.effect) {
-            this.effect.cleanup();
-            this.effect = null;
-        }
-        if (this.bgActor) {
-            this.bgActor.destroy();
-            this.bgActor = null;
-        }
-        // liquidBox is a child of bgActor and is already destroyed by bgActor.destroy().
-        // Just clear the reference here.
+        // Teardown order (effect before actor) is handled by GlassLayer.
+        this.layer?.destroy();
+        this.layer = null;
+        this.effect = null;
+        this.bgActor = null;
         this.liquidBox = null;
-        this._uiSampler?.destroy();
-        this._windowCloneManager?.destroy();
+        this._uiSampler = null;
+        this._windowCloneManager = null;
     }
     // 拡張機能全体が無効化される時の最終クリーンアップ
     cleanup() {

@@ -168,6 +168,87 @@ export class StageContrastSampler {
             }
         }
     }
+    /**
+     * Measures several regions from a SINGLE screen capture.
+     *
+     * `sampleLuminance` takes one screenshot, writes it to a PNG in the temp dir
+     * and decodes it again — so measuring N regions with it costs N of those
+     * round trips, serialized. A popup can easily hold 150 text actors (a
+     * calendar alone has 42 day cells), which makes per-region colouring
+     * unaffordable that way. Here the union is captured once and every sub-rect
+     * is read out of that one decoded pixbuf, so the cost no longer depends on
+     * how many regions are asked for.
+     *
+     * `subRects` are in the same absolute screen coordinates as `union`; any that
+     * fall outside it, or that hold no usable pixels, come back as null.
+     */
+    async sampleLuminanceRegions(union, subRects) {
+        const out = subRects.map(() => null);
+        if (!union || union.width <= 0 || union.height <= 0 || subRects.length === 0)
+            return out;
+        const filePath = _buildTempPath();
+        const captured = await _captureAreaToFile(this._screenshot, union, filePath);
+        if (!captured)
+            return out;
+        try {
+            const pixbuf = GdkPixbuf.Pixbuf.new_from_file(filePath);
+            if (!pixbuf)
+                return out;
+            const width = pixbuf.get_width();
+            const height = pixbuf.get_height();
+            const rowstride = pixbuf.get_rowstride();
+            const channels = pixbuf.get_n_channels();
+            const hasAlpha = pixbuf.get_has_alpha();
+            const pixels = pixbuf.get_pixels();
+            // The capture can come back at a different pixel size than requested on
+            // a scaled display, so map requested coordinates through that ratio.
+            const sx = width / union.width;
+            const sy = height / union.height;
+            for (let i = 0; i < subRects.length; i++) {
+                const r = subRects[i];
+                if (!r || r.width <= 0 || r.height <= 0)
+                    continue;
+                const x0 = _clamp(Math.floor((r.x - union.x) * sx), 0, Math.max(0, width - 1));
+                const y0 = _clamp(Math.floor((r.y - union.y) * sy), 0, Math.max(0, height - 1));
+                const x1 = _clamp(Math.ceil((r.x - union.x + r.width) * sx), x0 + 1, width);
+                const y1 = _clamp(Math.ceil((r.y - union.y + r.height) * sy), y0 + 1, height);
+                const step = Math.max(1, Math.floor(Math.min(x1 - x0, y1 - y0) / 48));
+                const values = [];
+                for (let y = y0; y < y1; y += step) {
+                    for (let x = x0; x < x1; x += step) {
+                        const idx = y * rowstride + x * channels;
+                        if (hasAlpha) {
+                            const a = pixels[idx + 3];
+                            if (a < 32)
+                                continue;
+                            if (a < 255) {
+                                const scale = 255.0 / a;
+                                const rr = _clamp(Math.round(pixels[idx + 0] * scale), 0, 255);
+                                const gg = _clamp(Math.round(pixels[idx + 1] * scale), 0, 255);
+                                const bb = _clamp(Math.round(pixels[idx + 2] * scale), 0, 255);
+                                values.push(_luminanceFromRgb(rr, gg, bb));
+                                continue;
+                            }
+                        }
+                        values.push(_luminanceFromRgb(pixels[idx + 0], pixels[idx + 1], pixels[idx + 2]));
+                    }
+                }
+                out[i] = _trimmedMean(values, 0.10);
+            }
+            return out;
+        }
+        catch (e) {
+            return out;
+        }
+        finally {
+            try {
+                GLib.unlink(filePath);
+            }
+            catch (_) {
+                // Ignore cleanup errors.
+            }
+        }
+    }
     decideTextColor(luminance, config = AdaptiveContrastConfig) {
         if (luminance === null || luminance === undefined)
             return null;
@@ -193,7 +274,10 @@ export class StageContrastSampler {
             if (!merged)
                 return result;
             const luma = await this.sampleLuminance(merged);
-            if (!luma)
+            // Only null means "could not measure". A luminance of exactly 0.0 is a
+            // legitimate reading (a pure black backdrop) and must not be discarded —
+            // `!luma` used to throw that away and leave the text at its old colour.
+            if (luma === null)
                 return result;
             const color = this.decideTextColor(luma, config);
             if (!color)
@@ -202,10 +286,15 @@ export class StageContrastSampler {
                 result.set(actor, color);
             return result;
         }
+        // Per-element: one region per actor, but a single capture for all of them.
+        const merged = _mergeRects(rects);
+        if (!merged)
+            return result;
+        const lumas = await this.sampleLuminanceRegions(merged, rects);
         for (let i = 0; i < targets.length; i++) {
-            const luma = await this.sampleLuminance(rects[i]);
-            if (!luma)
-                return result;
+            const luma = lumas[i];
+            if (luma === null || luma === undefined)
+                continue;
             const color = this.decideTextColor(luma, config);
             if (color)
                 result.set(targets[i], color);

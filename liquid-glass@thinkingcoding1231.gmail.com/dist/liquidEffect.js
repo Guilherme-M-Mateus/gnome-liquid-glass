@@ -912,6 +912,8 @@ export const LiquidEffect = GObject.registerClass({
             // Watch for changes.
             const id = settings.connect(`changed::${map.key}`, () => {
                 this._setFloat(map.uniform, settings.get_double(map.key));
+                // These three are also the bases setAnimationScale multiplies.
+                this.invalidateAnimationScaleCache();
             });
             this._settingsIds.push(id);
         });
@@ -1022,10 +1024,31 @@ export const LiquidEffect = GObject.registerClass({
         const settings = this._settings;
         if (!settings)
             return;
-        this._setFloat('displacement_scale', settings.get_double('glass-displacement-scale') * scale);
-        this._setFloat('max_z', settings.get_double('glass-max-z') * scale);
-        this._setFloat('chroma_strength', settings.get_double('glass-chroma-strength') * scale);
+        // Clamped at 1.0: this scales the user's configured refraction, thickness
+        // and chromatic aberration, so a scale above 1 would push all three past
+        // the maximum they asked for. Nothing should exceed the resting look.
+        const s = Math.max(0, Math.min(1, scale));
+        if (this._lastAnimationScale === s)
+            return;
+        this._lastAnimationScale = s;
+        // Called once per frame while a popup animates, so the three source values
+        // are cached rather than re-read from GSettings every time.
+        if (this._animBaseDisplacement === undefined) {
+            this._animBaseDisplacement = settings.get_double('glass-displacement-scale');
+            this._animBaseMaxZ = settings.get_double('glass-max-z');
+            this._animBaseChroma = settings.get_double('glass-chroma-strength');
+        }
+        this._setFloat('displacement_scale', this._animBaseDisplacement * s);
+        this._setFloat('max_z', this._animBaseMaxZ * s);
+        this._setFloat('chroma_strength', this._animBaseChroma * s);
         this.queue_repaint();
+    }
+    /** Drops the cached animation bases so the next call re-reads GSettings. */
+    invalidateAnimationScaleCache() {
+        this._animBaseDisplacement = undefined;
+        this._animBaseMaxZ = undefined;
+        this._animBaseChroma = undefined;
+        this._lastAnimationScale = undefined;
     }
     setPointerPosition(x, y, intensity) {
         this._setFloat('pointer_x', x);

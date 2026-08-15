@@ -63,7 +63,7 @@ This is not just a blurred background. I built a custom `Clutter.ShaderEffect` t
 - **Refraction via Snell's Law**: Calculates realistic light bending using the Index of Refraction (IOR). It projects the refracted view vector onto the background plane to determine spatial displacement.
 - **Volume Profiling**: Computes interior depth using **Superellipse** cross-section formulas, allowing the capsule to simulate fluid-like thickness and smooth height falloffs toward the edges.
 - **Complex Lighting Model**: Combines directional rim lighting with fresnel falloff, specular highlights, and surface sheen matched to 3D surface normals rather than flat 2D gradients.
-- **Custom Spring Physics**: Bypasses standard CSS transitions to implement a custom physics-based Spring animation system for opening/closing menus, mimicking the natural, snappy feel of native UI. (Only for panel menus for now.)
+- **Native Open/Close Animation**: Popups ride GNOME's own BoxPointer transition and the glass tracks it frame by frame. An earlier custom spring ran *on top of* that transition rather than replacing it, so the two compounded — the popup started at 19% scale and overshot to 123% before settling about a second later. Letting GNOME own the animation removed both the overshoot and roughly 450 lines.
 - **Adaptive Text Coloring**: Dynamically adjusts text color based on the underlying background brightness to maintain readability while preserving the glassy aesthetic.
 
 
@@ -102,5 +102,26 @@ npm run dev
 - [x] Add Adaptive Text Coloring
 - [x] Add Quick Settings Support
 - [x] Add OSD Support
+- [x] Add Top Panel Bar Support (floating pill / full-width)
+- [x] Add Settings Export & Import
+- [x] Unify all popups onto one shared settings page
+- [x] Add a fully transparent top panel mode
 - [ ] Add Perfect Antialiasing
 - [ ] Publish to extensions.gnome.org
+
+## ⚠️ Settings changes
+
+Two rounds of cleanup changed the settings layout. Export your settings first
+(**General → Export Settings**) if you are upgrading from an older build.
+
+- **Popups share one set of keys.** The calendar menu, Quick Settings,
+  notifications and OSDs used to carry four near-identical copies of the same
+  tint / blur / corner / colour settings. They now read one `popup-*` set,
+  configured on a single **Popups** page. Anything genuinely per-surface — the
+  enable toggles and the positional offsets — is unchanged. Previously tuned
+  per-popup values are not migrated.
+- **The custom spring animation is gone.** Popups now use GNOME's own open and
+  close transition, which the extension had been running its own spring on top
+  of — the two animations were compounding, which is why popups appeared to
+  inflate and wobble. The `*-spring-*`, `*-animation-interval-ms` and
+  `enable-*-animation` keys have been removed along with it.

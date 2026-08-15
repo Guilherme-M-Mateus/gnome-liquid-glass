@@ -5,7 +5,8 @@ import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import { LiquidEffect } from './liquidEffect.js';
-import { StageContrastSampler, AdaptiveContrastConfig } from './contrastSampler.js';
+import { GlassLayer } from './glassSurface.js';
+import { AdaptiveTextController, AdaptiveGroup, findTextActors } from './adaptiveText.js';
 import Gio from 'gi://Gio';
 import {
   UnpickableActor,
@@ -45,6 +46,7 @@ export class NotificationManager {
 
   private _windowCloneManager: WindowCloneManager | null = null;
   private _uiSampler: UILayerSampler | null = null;
+  private layer: GlassLayer | null = null;
 
   private _signals: number[];
   private _settingsSignals: number[];
@@ -60,18 +62,13 @@ export class NotificationManager {
   private _lastScreenW: number | undefined;
   private _lastScreenH: number | undefined;
 
-  private _contrastSampler: StageContrastSampler;
-  private _adaptiveConfig: typeof AdaptiveContrastConfig;
-  private _adaptiveTimerId: number;
-  private _adaptiveInFlight: boolean;
-  private _styledActors: Map<Clutter.Actor, string>;
+  private _adaptiveText: AdaptiveTextController | null = null;
 
   private _glassExpand: number;
   private _baseTint: number;
   private _currentTint: number;
   private _notificationYOffset: number;
 
-  private _isFirstAdaptiveRun: boolean = true;
 
   constructor(extensionPath: string, settings: Gio.Settings, logger: Logger) {
     this.extensionPath = extensionPath;
@@ -84,16 +81,6 @@ export class NotificationManager {
     this._frameSyncId = 0;
     this._isEffectActive = false;
 
-    this._contrastSampler = new StageContrastSampler();
-    this._adaptiveConfig = {
-      ...AdaptiveContrastConfig,
-      enabled: true,
-      samplePerElement: false,
-      sampleIntervalMs: 400,
-    };
-    this._adaptiveTimerId = 0;
-    this._adaptiveInFlight = false;
-    this._styledActors = new Map();
 
     this._glassExpand = 12;
     this._baseTint = 0.08;
@@ -132,64 +119,64 @@ export class NotificationManager {
       else if (!enabled && this._isEffectActive) this._removeEffect();
     });
 
-    connectSetting('notification-tint-color', () => {
+    connectSetting('popup-tint-color', () => {
       if (this.effect && this._isEffectActive) {
-        let colorArray = this._hexToColorArray(this._settings.get_string('notification-tint-color'));
+        let colorArray = this._hexToColorArray(this._settings.get_string('popup-tint-color'));
         this.effect.setTintColor(...colorArray);
       }
     });
 
-    connectSetting('notification-tint-strength', () => {
+    connectSetting('popup-tint-strength', () => {
       if (this.effect && this._isEffectActive) {
-        this._baseTint = this._settings.get_double('notification-tint-strength');
+        this._baseTint = this._settings.get_double('popup-tint-strength');
         this._currentTint = this._baseTint;
         this.effect.setTintStrength(this._baseTint);
       }
     });
 
-    connectSetting('notification-blur-radius', () => {
+    connectSetting('popup-blur-radius', () => {
       if (this.effect && this._isEffectActive) {
-        this.effect.setBlurRadius(this._settings.get_int('notification-blur-radius'));
+        this.effect.setBlurRadius(this._settings.get_int('popup-blur-radius'));
       }
     });
 
-    connectSetting('notification-corner-radius', () => {
+    connectSetting('popup-corner-radius', () => {
       if (this.effect && this._isEffectActive) {
-        this.effect.setCornerRadius(this._settings.get_double('notification-corner-radius'));
+        this.effect.setCornerRadius(this._settings.get_double('popup-corner-radius'));
       }
     });
 
-    connectSetting('notification-glass-expand', () => {
+    connectSetting('popup-glass-expand', () => {
       if (this._isEffectActive) {
-        this._glassExpand = this._settings.get_int('notification-glass-expand');
+        this._glassExpand = this._settings.get_int('popup-glass-expand');
       }
     });
 
     // Brightness / Saturation / Contrast — dynamic application from settings
-    connectSetting('notification-brightness', () => {
+    connectSetting('popup-brightness', () => {
       if (this.effect && this._isEffectActive) {
-        this.effect.setBrightness(this._settings.get_double('notification-brightness'));
+        this.effect.setBrightness(this._settings.get_double('popup-brightness'));
       }
     });
 
-    connectSetting('notification-saturation', () => {
+    connectSetting('popup-saturation', () => {
       if (this.effect && this._isEffectActive) {
-        this.effect.setSaturation(this._settings.get_double('notification-saturation'));
+        this.effect.setSaturation(this._settings.get_double('popup-saturation'));
       }
     });
 
-    connectSetting('notification-contrast', () => {
+    connectSetting('popup-contrast', () => {
       if (this.effect && this._isEffectActive) {
-        this.effect.setContrast(this._settings.get_double('notification-contrast'));
+        this.effect.setContrast(this._settings.get_double('popup-contrast'));
       }
     });
 
-    connectSetting('notification-enable-adaptive-text-color', () => {
-      this._adaptiveConfig.enabled = this._settings.get_boolean('notification-enable-adaptive-text-color');
+    connectSetting('popup-enable-adaptive-text-color', () => {
+      this._adaptiveText?.syncSettings();
     });
 
-    connectSetting('notification-sample-interval-ms', () => {
-      this._adaptiveConfig.sampleIntervalMs = this._settings.get_int('notification-sample-interval-ms');
+    connectSetting('popup-sample-interval-ms', () => {
+      this._adaptiveText?.syncSettings();
     });
 
     connectSetting('notification-y-offset', () => {
@@ -201,6 +188,9 @@ export class NotificationManager {
     if (this._isEffectActive) return;
     this._isEffectActive = true;
 
+    // Adaptive text colouring — shared implementation, see src/adaptiveText.ts
+    this._createAdaptiveText();
+
     // @ts-expect-error: _bannerBin is an internal property
     let bannerBin = this.tray._bannerBin;
     if (!bannerBin) {
@@ -209,10 +199,9 @@ export class NotificationManager {
     }
 
     // Apply settings initially
-    this._adaptiveConfig.enabled = this._settings.get_boolean('notification-enable-adaptive-text-color');
-    this._adaptiveConfig.sampleIntervalMs = this._settings.get_int('notification-sample-interval-ms');
-    this._glassExpand = this._settings.get_int('notification-glass-expand');
-    this._baseTint = this._settings.get_double('notification-tint-strength');
+      this._adaptiveText?.syncSettings();
+    this._glassExpand = this._settings.get_int('popup-glass-expand');
+    this._baseTint = this._settings.get_double('popup-tint-strength');
     this._currentTint = this._baseTint;
     this._notificationYOffset = this._settings.get_int('notification-y-offset');
 
@@ -255,30 +244,6 @@ export class NotificationManager {
       this.tray._bannerBin.translation_y = this._settings.get_int('notification-y-offset');
     }
 
-    // ── 1. bgActor: full monitor, no effect ──────────────────────────────────
-    this.bgActor = new UnpickableActor();
-    this.bgActor.set_name('liquid-glass-bg-actor');
-    this.bgActor.set_size(1.0, 1.0);
-    this.bgActor.set_pivot_point(0.0, 0.0);
-
-    // ── 2. liquidBox: outer layer — LiquidEffect with built-in dual-Kawase blur ─
-    this.liquidBox = new UnpickableActor();
-    this.liquidBox.set_name('liquid-box');
-    this.liquidBox.set_clip_to_allocation(true);
-    this.bgActor.add_child(this.liquidBox);
-
-    // dummyBreaker: prevents BMS black-screen optimization bug
-    let dummyBreaker = new UnpickableActor();
-    dummyBreaker.set_name('optimization-breaker');
-    dummyBreaker.set_size(1.0, 1.0);
-    dummyBreaker.set_opacity(0);
-    this.liquidBox.add_child(dummyBreaker);
-
-    // ── 3. _cloneContainer: sub-container inside liquidBox ────────────────────
-    this._cloneContainer = new UnpickableActor();
-    this._cloneContainer.set_name('clone-container');
-    this.liquidBox.add_child(this._cloneContainer);
-
     // ── Find the bannerBin's ancestor that is a direct child of uiGroup ──────
     // @ts-expect-error
     let bannerBin = this.tray._bannerBin;
@@ -289,47 +254,23 @@ export class NotificationManager {
       bannerRoot = p;
     }
 
-    // Insert bgActor below the notification root in uiGroup to prevent recursive
-    // clone loops (same pattern as dockManager / uiManager)
-    if (bannerRoot.get_parent() === Main.layoutManager.uiGroup) {
-      Main.layoutManager.uiGroup.insert_child_below(this.bgActor, bannerRoot);
-    } else {
-      Main.layoutManager.uiGroup.add_child(this.bgActor);
-    }
+    // Actor tree, shader and clone samplers — all shared, see glassSurface.ts.
+    this._baseTint = this._settings.get_double('popup-tint-strength');
+    this.layer = new GlassLayer({
+      extensionPath: this.extensionPath,
+      settings: this._settings,
+      logger: this._logger,
+      keyPrefix: 'popup',
+      root: bannerRoot,
+    });
+    this.bgActor = this.layer.bgActor;
+    this.liquidBox = this.layer.liquidBox;
+    this._cloneContainer = this.layer.cloneContainer;
+    this.effect = this.layer.effect;
+    this._windowCloneManager = this.layer.windowClones;
+    this._uiSampler = this.layer.uiSampler;
 
-    // ── 4. Read effect parameters from settings ───────────────────────────────
-    let blurRadius = this._settings.get_int('notification-blur-radius');
-    let tintColorStr = this._settings.get_string('notification-tint-color');
-    let cornerRadius = this._settings.get_double('notification-corner-radius');
-    let tintStrength = this._settings.get_double('notification-tint-strength');
-    let brightness = this._settings.get_double('notification-brightness');
-    let saturation = this._settings.get_double('notification-saturation');
-    let contrast = this._settings.get_double('notification-contrast');
-    this._baseTint = tintStrength;
-
-    // LiquidEffect on liquidBox (includes built-in dual-Kawase blur)
-    this.effect = new LiquidEffect({ extensionPath: this.extensionPath, settings: this._settings } as any);
-    this.effect.setPadding(SHADER_PADDING);
-    this.effect.setTintColor(...this._hexToColorArray(tintColorStr));
-    this.effect.setTintStrength(this._baseTint);
-    this.effect.setCornerRadius(cornerRadius);
-    this.effect.setIsDock(false);
-    this.effect.setBrightness(brightness);
-    this.effect.setSaturation(saturation);
-    this.effect.setContrast(contrast);
-    this.effect.setBlurRadius(blurRadius);
-    this.liquidBox.add_effect(this.effect);
-
-    // ── 5. WindowCloneManager + UILayerSampler ────────────────────────────────
-    this._windowCloneManager = new WindowCloneManager(this.liquidBox, this._cloneContainer);
-    this._uiSampler = new UILayerSampler(
-      this.bgActor,
-      this.liquidBox,
-      [bannerRoot, global.windowGroup, global.window_group],
-      this._cloneContainer
-    );
-
-    this.bgActor.show();
+    this.layer.show();
 
     // Initial clone build (also applies liquid-glass mutual exclusions)
     this._buildClones();
@@ -355,8 +296,7 @@ export class NotificationManager {
     };
 
     this._frameSyncId = this._laterAdd(frameLaterType, frameTick);
-    this._isFirstAdaptiveRun = true;
-    this._startAdaptiveColorSampling();
+    this._adaptiveText?.start();
   }
 
   // ── Geometry synchronisation ────────────────────────────────────────────────
@@ -491,8 +431,8 @@ export class NotificationManager {
 
   // ── Per-banner cleanup ──────────────────────────────────────────────────────
   _cleanupCurrentBanner() {
-    this._stopAdaptiveColorSampling();
-    this._clearAdaptiveStyles();
+    this._adaptiveText?.stop();
+    this._adaptiveText?.clear();
 
     // @ts-expect-error
     if (this.tray._bannerBin) {
@@ -511,25 +451,14 @@ export class NotificationManager {
       this._frameSyncId = 0;
     }
 
-    // DESTROY EFFECT FIRST (must happen before bgActor.destroy())
-    if (this.effect) {
-      this.effect.cleanup();
-      this.effect = null;
-    }
-
-    // DESTROY ACTOR HIERARCHY — bgActor.destroy() cascades through
-    // liquidBox → _cloneContainer and all their children.
-    if (this.bgActor) {
-      this.bgActor.destroy();
-      this.bgActor = null;
-    }
+    // Teardown order (effect before actor) is handled by GlassLayer.
+    this.layer?.destroy();
+    this.layer = null;
+    this.effect = null;
+    this.bgActor = null;
     this.liquidBox = null;
     this._cloneContainer = null;
-
-    // Clean up managers (their destroy() guards against already-destroyed actors)
-    this._uiSampler?.destroy();
     this._uiSampler = null;
-    this._windowCloneManager?.destroy();
     this._windowCloneManager = null;
 
     // Reset cached geometry state
@@ -541,7 +470,6 @@ export class NotificationManager {
     this._lastScreenH = undefined;
     this._stableBaseW = undefined;
 
-    this._isFirstAdaptiveRun = true;
   }
 
   // ── Effect remove / cleanup ─────────────────────────────────────────────────
@@ -569,158 +497,6 @@ export class NotificationManager {
 
   // ── Adaptive text colour helpers (unchanged logic) ──────────────────────────
 
-  _collectAdaptiveTextTargets(actor: Clutter.Actor | null = this.currentBanner, targets: Clutter.Actor[] = []): Clutter.Actor[] {
-    if (!actor) return targets;
-    return this._findAllTextActors(actor);
-  }
-
-  _setActorColor(actor: CustomBannerActor, color: string, skipAnimations = false) {
-    if (!actor || typeof actor.set_style !== 'function') return;
-    if (actor._currentTargetColor === color) return;
-    actor._currentTargetColor = color;
-    this._animateActorColor(actor, color, 380, skipAnimations);
-  }
-
-  _clearAdaptiveStyles() {
-    for (const [actor, style] of this._styledActors.entries() as MapIterator<[CustomBannerActor, string]>) {
-      if (actor && typeof actor.set_style === 'function') {
-        if (actor._colorTweenId !== undefined) {
-          GLib.source_remove(actor._colorTweenId);
-          actor._colorTweenId = undefined;
-        }
-        actor._currentTargetColor = undefined;
-        actor.remove_style_class_name('adaptive-text-transition');
-        actor.remove_style_class_name('adaptive-color-light');
-        actor.remove_style_class_name('adaptive-color-dark');
-        actor.set_style(style);
-      }
-    }
-    this._styledActors.clear();
-  }
-
-  _applyAdaptiveColorMap(colorMap: Map<Clutter.Actor, string>, skipAnimations = false) {
-    if (!colorMap || colorMap.size === 0) return;
-    for (const [actor, color] of colorMap.entries()) {
-      this._setActorColor(actor as unknown as CustomBannerActor, color, skipAnimations);
-    }
-  }
-
-  _startAdaptiveColorSampling() {
-    if (!this._adaptiveConfig.enabled) return;
-    this._updateAdaptiveTextColors();
-
-    if (this._adaptiveTimerId !== 0) return;
-
-    this._adaptiveTimerId = GLib.timeout_add(
-      GLib.PRIORITY_DEFAULT,
-      this._adaptiveConfig.sampleIntervalMs,
-      () => {
-        if (!this.currentBanner || !this.bgActor) {
-          this._adaptiveTimerId = 0;
-          return GLib.SOURCE_REMOVE;
-        }
-        this._updateAdaptiveTextColors();
-        return GLib.SOURCE_CONTINUE;
-      }
-    );
-  }
-
-  _stopAdaptiveColorSampling() {
-    if (this._adaptiveTimerId !== 0) {
-      GLib.source_remove(this._adaptiveTimerId);
-      this._adaptiveTimerId = 0;
-    }
-  }
-
-  _findAllTextActors(actor: Clutter.Actor, foundActors: Clutter.Actor[] = []) {
-    if (!actor) return foundActors;
-
-    if (actor instanceof St.Label || actor instanceof Clutter.Text || actor instanceof St.Button) {
-      if (actor.visible) foundActors.push(actor);
-    }
-
-    let children = actor.get_children();
-    for (let i = 0; i < children.length; i++) {
-      this._findAllTextActors(children[i], foundActors);
-    }
-    return foundActors;
-  }
-
-  _updateAdaptiveTextColors() {
-    if (!this._adaptiveConfig.enabled || this._adaptiveInFlight) return;
-
-    let [absX, absY] = this.currentBanner?.get_transformed_position() ?? [0, 0];
-    if (absY < 0) return;
-
-    const targets = this._collectAdaptiveTextTargets();
-    if (targets.length === 0) return;
-
-    this._adaptiveInFlight = true;
-
-    this._contrastSampler
-      .chooseColorsForActors(targets, this._adaptiveConfig)
-      .then(colorMap => {
-        this._applyAdaptiveColorMap(colorMap, this._isFirstAdaptiveRun);
-        this._isFirstAdaptiveRun = false;
-      })
-      .catch(e => {
-        this._logger.error(`[Liquid Glass] Notification adaptive color update failed: ${e}`);
-      })
-      .finally(() => {
-        this._adaptiveInFlight = false;
-      });
-  }
-
-  _hexToRgb(hex: string) {
-    let bigint = parseInt(hex.replace('#', ''), 16);
-    return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
-  }
-
-  _rgbToHex(r: number, g: number, b: number) {
-    return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1);
-  }
-
-  _animateActorColor(actor: CustomBannerActor, targetHexColor: string, durationMs = 380, skipAnimations = false) {
-    if (!actor || Object.keys(actor).length === 0) return;
-
-    if (actor._colorTweenId) {
-      GLib.source_remove(actor._colorTweenId);
-      actor._colorTweenId = undefined;
-    }
-
-    let themeNode = actor.get_theme_node();
-    let startColor = themeNode.get_foreground_color();
-    let targetRgb = this._hexToRgb(targetHexColor);
-    let startTime = GLib.get_monotonic_time();
-
-    if (skipAnimations) {
-      actor.set_style(`color: ${targetHexColor}; -st-icon-foreground-color: ${targetHexColor};`);
-      return;
-    }
-
-    actor._colorTweenId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
-      if (!actor || Object.keys(actor).length === 0) return GLib.SOURCE_REMOVE;
-
-      let currentTime = GLib.get_monotonic_time();
-      let elapsedMs = (currentTime - startTime) / 1000;
-      let progress = Math.min(elapsedMs / durationMs, 1.0);
-      let ease = progress < 0.5
-        ? 2 * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-
-      let r = Math.round(startColor.red + (targetRgb.r - startColor.red) * ease);
-      let g = Math.round(startColor.green + (targetRgb.g - startColor.green) * ease);
-      let b = Math.round(startColor.blue + (targetRgb.b - startColor.blue) * ease);
-      actor.set_style(`color: ${this._rgbToHex(r, g, b)}; -st-icon-foreground-color: ${this._rgbToHex(r, g, b)};`);
-
-      if (progress >= 1.0) {
-        actor._colorTweenId = undefined;
-        return GLib.SOURCE_REMOVE;
-      }
-      return GLib.SOURCE_CONTINUE;
-    });
-  }
-
   _hasStyleClass(actor: St.Widget, className: string) {
     return typeof actor?.has_style_class_name === 'function' &&
       actor.has_style_class_name(className);
@@ -729,4 +505,24 @@ export class NotificationManager {
   _laterAdd(laterType: Meta.LaterType, callback: GLib.SourceFunc) {
     return global.compositor?.get_laters?.().add(laterType, callback);
   }
+  /** The banner is one region; its own body/title share a backdrop. */
+  _buildAdaptiveGroups(): AdaptiveGroup[] {
+    const banner = this.currentBanner as Clutter.Actor | null;
+    if (!banner || !banner.mapped) return [];
+    const targets = findTextActors(banner);
+    return targets.length > 0 ? [{ key: banner, targets }] : [];
+  }
+
+  _createAdaptiveText() {
+    this._adaptiveText?.destroy();
+    this._adaptiveText = new AdaptiveTextController({
+      settings: this._settings,
+      logger: this._logger,
+      enabledKey: 'popup-enable-adaptive-text-color',
+      intervalKey: 'popup-sample-interval-ms',
+      collectGroups: () => this._buildAdaptiveGroups(),
+      shouldSample: () => !!this.currentBanner?.mapped,
+    });
+  }
+
 }

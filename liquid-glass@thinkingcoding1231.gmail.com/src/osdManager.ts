@@ -4,14 +4,10 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
-import { LiquidEffect } from './liquidEffect.js';
-import { StageContrastSampler, AdaptiveContrastConfig } from './contrastSampler.js';
+import { GlassLayer } from './glassSurface.js';
+import { AdaptiveTextController, AdaptiveGroup, findTextActors } from './adaptiveText.js';
 import Gio from 'gi://Gio';
-import {
-  UnpickableActor,
-  UILayerSampler,
-  WindowCloneManager,
-} from './utils.js';
+
 
 import { Logger } from './logger.js';
 
@@ -25,27 +21,7 @@ interface OsdState {
   osdWindow: any;   // GNOME internal OsdWindow (no strict type)
   targetBox: St.Widget;
 
-  bgActor: Clutter.Actor | null;
-
-  // Full-screen FBO actor hierarchy
-  liquidBox: Clutter.Actor | null;  // LiquidEffect (with built-in blur) lives here
-  _cloneContainer: Clutter.Actor | null;
-
-  effect: LiquidEffect | null;
-
-  // Clone managers (replace manual clone tracking)
-  _windowCloneManager: WindowCloneManager | null;
-  _uiSampler: UILayerSampler | null;
-
-  // Shader geometry cache
-  _lastBgW?: number;
-  _lastBgH?: number;
-  _lastBgX?: number;
-  _lastBgY?: number;
-
-  // Monitor size cache for change detection
-  _lastScreenW?: number;
-  _lastScreenH?: number;
+  layer: GlassLayer | null;
 
   // OSD-specific state
   _stableBaseH?: number;
@@ -56,7 +32,6 @@ interface OsdState {
 }
 
 // ========== Configuration Parameters (Defaults, overridden by settings) ==========
-const SHADER_PADDING = 20;
 
 export class OsdManager {
   private extensionPath: string;
@@ -72,12 +47,7 @@ export class OsdManager {
   private _baseTint: number;
   private _glassExpand: number;
   private _monitorsChangedId: number;
-  private _contrastSampler: StageContrastSampler;
-  private _adaptiveConfig: typeof AdaptiveContrastConfig;
-  private _adaptiveTimerId: number;
-  private _adaptiveInFlight: boolean;
-  private _styledActors: Map<Clutter.Actor, string>;
-  private _isFirstAdaptiveRun: boolean;
+  private _adaptiveText: AdaptiveTextController | null = null;
 
   constructor(extensionPath: string, settings: Gio.Settings, logger: Logger) {
     this.extensionPath = extensionPath;
@@ -90,21 +60,10 @@ export class OsdManager {
     this._monitorsChangedId = 0;
     this._isEffectActive = false;
 
-    this._contrastSampler = new StageContrastSampler();
-    this._adaptiveConfig = {
-      ...AdaptiveContrastConfig,
-      enabled: true,
-      samplePerElement: false,
-      sampleIntervalMs: 400,
-    };
-    this._adaptiveTimerId = 0;
-    this._adaptiveInFlight = false;
-    this._styledActors = new Map();
 
     this._glassExpand = 12;
     this._baseTint = 0.08;
     this._osdYOffset = 0;
-    this._isFirstAdaptiveRun = true;
   }
 
   setup() {
@@ -137,88 +96,89 @@ export class OsdManager {
       else if (!enabled && this._isEffectActive) this._removeEffect();
     });
 
-    connectSetting('osd-tint-color', () => {
+    connectSetting('popup-tint-color', () => {
       if (this._isEffectActive) {
-        let colorArray = this._hexToColorArray(this._settings.get_string('osd-tint-color'));
+        let colorArray = this._hexToColorArray(this._settings.get_string('popup-tint-color'));
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setTintColor(...colorArray);
+          state.layer?.effect.setTintColor(...colorArray);
         }
       }
     });
 
-    connectSetting('osd-tint-strength', () => {
+    connectSetting('popup-tint-strength', () => {
       if (this._isEffectActive) {
-        this._baseTint = this._settings.get_double('osd-tint-strength');
+        this._baseTint = this._settings.get_double('popup-tint-strength');
         for (let state of this._osdStates) {
           state._currentTint = this._baseTint;
-          if (state.effect) state.effect.setTintStrength(this._baseTint);
+          state.layer?.effect.setTintStrength(this._baseTint);
         }
       }
     });
 
-    connectSetting('osd-blur-radius', () => {
+    connectSetting('popup-blur-radius', () => {
       if (this._isEffectActive) {
-        let radius = this._settings.get_int('osd-blur-radius');
+        let radius = this._settings.get_int('popup-blur-radius');
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setBlurRadius(radius);
+          state.layer?.effect.setBlurRadius(radius);
         }
       }
     });
 
-    connectSetting('osd-corner-radius', () => {
+    connectSetting('popup-corner-radius', () => {
       if (this._isEffectActive) {
-        let radius = this._settings.get_double('osd-corner-radius');
+        let radius = this._settings.get_double('popup-corner-radius');
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setCornerRadius(radius);
+          state.layer?.effect.setCornerRadius(radius);
         }
       }
     });
 
-    connectSetting('osd-glass-expand', () => {
+    connectSetting('popup-glass-expand', () => {
       if (this._isEffectActive) {
-        this._glassExpand = this._settings.get_int('osd-glass-expand');
+        this._glassExpand = this._settings.get_int('popup-glass-expand');
       }
     });
 
     // ----------  Brightness / Saturation / Contrast  ----------
-    connectSetting('osd-brightness', () => {
+    connectSetting('popup-brightness', () => {
       if (this._isEffectActive) {
-        let v = this._settings.get_double('osd-brightness');
+        let v = this._settings.get_double('popup-brightness');
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setBrightness(v);
+          state.layer?.effect.setBrightness(v);
         }
       }
     });
 
-    connectSetting('osd-saturation', () => {
+    connectSetting('popup-saturation', () => {
       if (this._isEffectActive) {
-        let v = this._settings.get_double('osd-saturation');
+        let v = this._settings.get_double('popup-saturation');
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setSaturation(v);
+          state.layer?.effect.setSaturation(v);
         }
       }
     });
 
-    connectSetting('osd-contrast', () => {
+    connectSetting('popup-contrast', () => {
       if (this._isEffectActive) {
-        let v = this._settings.get_double('osd-contrast');
+        let v = this._settings.get_double('popup-contrast');
         for (let state of this._osdStates) {
-          if (state.effect) state.effect.setContrast(v);
+          state.layer?.effect.setContrast(v);
         }
       }
     });
 
-    connectSetting('osd-enable-adaptive-text-color', () => {
-      this._adaptiveConfig.enabled = this._settings.get_boolean('osd-enable-adaptive-text-color');
-      if (this._adaptiveConfig.enabled) this._startAdaptiveColorSampling();
-      else {
-        this._stopAdaptiveColorSampling();
-        this._clearAdaptiveStyles();
+    connectSetting('popup-enable-adaptive-text-color', () => {
+      this._adaptiveText?.syncSettings();
+      if (this._adaptiveText?.enabled) {
+        this._adaptiveText.start();
+      } else {
+        this._adaptiveText?.stop();
+        this._adaptiveText?.clear();
       }
     });
 
-    connectSetting('osd-sample-interval-ms', () => {
-      this._adaptiveConfig.sampleIntervalMs = this._settings.get_int('osd-sample-interval-ms');
+    connectSetting('popup-sample-interval-ms', () => {
+      this._adaptiveText?.syncSettings();
     });
 
     connectSetting('osd-y-offset', () => {
@@ -235,10 +195,12 @@ export class OsdManager {
     if (this._isEffectActive) return;
     this._isEffectActive = true;
 
-    this._adaptiveConfig.enabled = this._settings.get_boolean('osd-enable-adaptive-text-color');
-    this._adaptiveConfig.sampleIntervalMs = this._settings.get_int('osd-sample-interval-ms');
-    this._glassExpand = this._settings.get_int('osd-glass-expand');
-    this._baseTint = this._settings.get_double('osd-tint-strength');
+    // Adaptive text colouring — shared implementation, see src/adaptiveText.ts
+    this._createAdaptiveText();
+
+      this._adaptiveText?.syncSettings();
+    this._glassExpand = this._settings.get_int('popup-glass-expand');
+    this._baseTint = this._settings.get_double('popup-tint-strength');
     this._osdYOffset = this._settings.get_int('osd-y-offset');
 
     let osdWindows = Main.osdWindowManager._osdWindows;
@@ -252,21 +214,8 @@ export class OsdManager {
     // After all states exist, apply mutual exclusions so each UILayerSampler
     // does not clone the other monitors' liquid-glass bgActors
     for (let state of this._osdStates) {
-      if (!state._uiSampler) continue;
-      // Add the bgActors of all OTHER states as exclusions
-      for (let other of this._osdStates) {
-        if (other !== state && other.bgActor) {
-          state._uiSampler.addExclusion(other.bgActor);
-        }
-      }
-      // Also exclude any other liquid-glass bgActors already in uiGroup
-      for (let child of Main.layoutManager.uiGroup.get_children()) {
-        if (child === state.bgActor) continue;
-        let isLiquidBg = child.get_name?.() === 'liquid-glass-bg-actor' ||
-          (typeof child.get_children === 'function' &&
-            child.get_children().some((c: Clutter.Actor) => c.get_name?.() === 'liquid-box'));
-        if (isLiquidBg) state._uiSampler.addExclusion(child);
-      }
+      if (!state.layer) continue;
+      state.layer.excludeOtherGlassRoots();
     }
 
     // Global frame-render loop (covers all OSD states)
@@ -284,7 +233,7 @@ export class OsdManager {
     };
 
     this._frameSyncId = this._laterAdd(frameLaterType, frameTick);
-    this._startAdaptiveColorSampling();
+    this._adaptiveText?.start();
 
     // Rebuild everything if monitor configuration changes
     this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
@@ -327,30 +276,6 @@ export class OsdManager {
     if (monitorIndex < 0) monitorIndex = Main.layoutManager.primaryIndex;
     let monitor = Main.layoutManager.monitors[monitorIndex] || Main.layoutManager.primaryMonitor;
 
-    // ── 1. bgActor: full monitor size, no effect ─────────────────────────────
-    let bgActor = new UnpickableActor();
-    bgActor.set_name('liquid-glass-bg-actor');
-    bgActor.set_size(1.0, 1.0);
-    bgActor.set_pivot_point(0.0, 0.0);
-
-    // ── 2. liquidBox: outer layer — LiquidEffect with built-in dual-Kawase blur ─
-    let liquidBox = new UnpickableActor();
-    liquidBox.set_name('liquid-box');
-    liquidBox.set_clip_to_allocation(true);
-    bgActor.add_child(liquidBox);
-
-    // dummyBreaker: prevents BMS black-screen optimization bug
-    let dummyBreaker = new UnpickableActor();
-    dummyBreaker.set_name('optimization-breaker');
-    dummyBreaker.set_size(1.0, 1.0);
-    dummyBreaker.set_opacity(0);
-    liquidBox.add_child(dummyBreaker);
-
-    // ── 3. _cloneContainer: sub-container inside liquidBox ────────────────────
-    let cloneContainer = new UnpickableActor();
-    cloneContainer.set_name('clone-container');
-    liquidBox.add_child(cloneContainer);
-
     // ── Find the OSD's ancestor that is a direct child of uiGroup ────────────
     let osdRoot: Clutter.Actor = osdWindow;
     while (osdRoot.get_parent() && osdRoot.get_parent() !== Main.layoutManager.uiGroup) {
@@ -359,67 +284,24 @@ export class OsdManager {
       osdRoot = p;
     }
 
-    // Insert bgActor below the OSD root in uiGroup
-    if (osdRoot.get_parent() === Main.layoutManager.uiGroup) {
-      Main.layoutManager.uiGroup.insert_child_below(bgActor, osdRoot);
-    } else {
-      Main.layoutManager.uiGroup.add_child(bgActor);
-    }
-
-    // ── 4. Read effect parameters ─────────────────────────────────────────────
-    let blurRadius = this._settings.get_int('osd-blur-radius');
-    let tintColorStr = this._settings.get_string('osd-tint-color');
-    let cornerRadius = this._settings.get_double('osd-corner-radius');
-    let brightness = this._settings.get_double('osd-brightness');
-    let saturation = this._settings.get_double('osd-saturation');
-    let contrast = this._settings.get_double('osd-contrast');
-
-    // LiquidEffect on liquidBox (includes built-in dual-Kawase blur)
-    let effect = new LiquidEffect({ extensionPath: this.extensionPath, settings: this._settings } as any);
-    effect.setPadding(SHADER_PADDING);
-    effect.setTintColor(...this._hexToColorArray(tintColorStr));
-    effect.setTintStrength(this._baseTint);
-    effect.setCornerRadius(cornerRadius);
-    effect.setIsDock(false);
-    effect.setBrightness(brightness);
-    effect.setSaturation(saturation);
-    effect.setContrast(contrast);
-    effect.setBlurRadius(blurRadius);
-    liquidBox.add_effect(effect);
-
-
-    bgActor.hide();
-
-    // ── 5. WindowCloneManager + UILayerSampler ────────────────────────────────
-    let windowCloneManager = new WindowCloneManager(liquidBox, cloneContainer);
-    let uiSampler = new UILayerSampler(
-      bgActor,
-      liquidBox,
-      [osdRoot, global.windowGroup, global.window_group],
-      cloneContainer
-    );
-
-    // ── 7. Build initial clones ───────────────────────────────────────────────
-    windowCloneManager.rebuildClones();
-    uiSampler.rebindSelf();
-    uiSampler.refresh();
+    // Actor tree, shader and clone samplers — all shared, see glassSurface.ts.
+    const layer = new GlassLayer({
+      extensionPath: this.extensionPath,
+      settings: this._settings,
+      logger: this._logger,
+      keyPrefix: 'popup',
+      root: osdRoot,
+    });
+    // The OSD's own tint is animated separately from the configured value.
+    layer.effect.setTintStrength(this._baseTint);
+    layer.hide();
+    layer.rebuildClones();
 
     // ── 6. Compose the state object ───────────────────────────────────────────
     let state: OsdState = {
       osdWindow,
       targetBox,
-      bgActor,
-      liquidBox,
-      _cloneContainer: cloneContainer,
-      effect,
-      _windowCloneManager: windowCloneManager,
-      _uiSampler: uiSampler,
-      _lastBgW: undefined,
-      _lastBgH: undefined,
-      _lastBgX: undefined,
-      _lastBgY: undefined,
-      _lastScreenW: undefined,
-      _lastScreenH: undefined,
+      layer,
       _stableBaseH: undefined,
       _currentTint: this._baseTint,
       _wasVisible: false,
@@ -431,17 +313,8 @@ export class OsdManager {
     // When the OSD window itself is destroyed, clean up our matching state
     state._destroyId = osdWindow.connect('destroy', () => {
       this._osdStates = this._osdStates.filter(s => s !== state);
-      // effect must be cleaned up before bgActor.destroy()
-      if (state.effect) {
-        try { state.effect.cleanup(); } catch (e) { }
-        state.effect = null;
-      }
-      if (state.bgActor) {
-        try { state.bgActor.destroy(); } catch (e) { }
-        state.bgActor = null;
-      }
-      state._uiSampler?.destroy();
-      state._windowCloneManager?.destroy();
+      state.layer?.destroy();
+      state.layer = null;
     });
   }
 
@@ -449,7 +322,7 @@ export class OsdManager {
   // Full-screen FBO approach: bgActor covers the full monitor, shader is told
   // where the OSD lives within that FBO via setGlassGeometry().
   _syncGeometry(state: OsdState) {
-    if (!state.bgActor || !state.targetBox) return;
+    if (!state.layer || !state.targetBox) return;
 
     let [w, h] = state.targetBox.get_size();
     let [absX, absY] = state.targetBox.get_transformed_position();
@@ -468,19 +341,17 @@ export class OsdManager {
 
     if (isVisible && !state._wasVisible) {
       state._wasVisible = true;
-      this._isFirstAdaptiveRun = true;
-      this._updateAdaptiveTextColors();
+      this._adaptiveText?.update();
     } else if (!isVisible && state._wasVisible) {
       state._wasVisible = false;
     }
-    state.bgActor.opacity = currentOpacity;
+    state.layer.bgActor.opacity = currentOpacity;
 
     if (!isVisible) {
-      state.bgActor.hide();
+      state.layer.hide();
       return;
-    } else if (!state.bgActor.visible) {
-      state.bgActor.show();
     }
+    state.layer.show();
 
     // OSD-specific margin-bottom bloat compensation (icon switch glitch)
     let themeNode = state.targetBox.get_theme_node();
@@ -507,67 +378,17 @@ export class OsdManager {
     let visualX = absX;
     let visualY = absY;
 
-    let bgW = visualW + (this._glassExpand * 2) + (SHADER_PADDING * 2);
-    let bgH = visualH + (this._glassExpand * 2) + (SHADER_PADDING * 2);
-    let bgX_abs = visualX - this._glassExpand - SHADER_PADDING;
-    let bgY_abs = visualY - this._glassExpand - SHADER_PADDING;
-
     // ── Monitor geometry ─────────────────────────────────────────────────────
     let monitorIndex = Main.layoutManager.findIndexForActor(state.osdWindow);
     if (monitorIndex < 0) monitorIndex = Main.layoutManager.primaryIndex;
     let monitor = Main.layoutManager.monitors[monitorIndex] || Main.layoutManager.primaryMonitor;
+    if (!monitor) return;
 
-    let monitorX = monitor?.x ?? 0;
-    let monitorY = monitor?.y ?? 0;
-    let screenW = Math.max(1, monitor?.width ?? 1);
-    let screenH = Math.max(1, monitor?.height ?? 1);
-
-    // Monitor-local shader coordinates
-    let localBgX = bgX_abs - monitorX;
-    let localBgY = bgY_abs - monitorY;
-
-    // ── Update actors only when geometry changed ─────────────────────────────
-    if (state._lastBgW !== bgW || state._lastBgH !== bgH ||
-      state._lastBgX !== bgX_abs || state._lastBgY !== bgY_abs ||
-      state._lastScreenW !== screenW || state._lastScreenH !== screenH) {
-
-      // bgActor: full monitor size, positioned at monitor origin
-      state.bgActor.remove_transition('size');
-      state.bgActor.remove_transition('position');
-      state.bgActor.set_position(monitorX, monitorY);
-      state.bgActor.set_size(screenW, screenH);
-      state.bgActor.remove_transition('size');
-      state.bgActor.remove_transition('position');
-
-      // liquidBox fills the entire bgActor
-      state.liquidBox?.set_position(0, 0);
-      state.liquidBox?.set_size(screenW, screenH);
-
-      // Soft clip — limits GPU work to the OSD area + generous margin
-      const CLIP_PADDING = 200;
-      state.liquidBox?.remove_clip();
-      state.bgActor.set_clip(
-        localBgX - CLIP_PADDING, localBgY - CLIP_PADDING,
-        bgW + CLIP_PADDING * 2, bgH + CLIP_PADDING * 2
-      );
-
-      const SHADOW_MAX_RADIUS = CLIP_PADDING - 20;
-      state.effect?.setShadowMaxRadius(SHADOW_MAX_RADIUS);
-
-      // Inform shader of full-screen resolution and OSD position within FBO
-      state.effect?.setResolution(screenW, screenH);
-      state.effect?.setGlassGeometry(localBgX, localBgY, bgW, bgH);
-
-      state._lastBgW = bgW; state._lastBgH = bgH;
-      state._lastBgX = bgX_abs; state._lastBgY = bgY_abs;
-      state._lastScreenW = screenW; state._lastScreenH = screenH;
-    }
-
-    // ── Sync clones every frame (dockManager pattern) ────────────────────────
-    state._windowCloneManager?.setOffset(-monitorX, -monitorY);
-    state._uiSampler?.refresh();
-    state._uiSampler?.sync(monitorX, monitorY, screenW, screenH);
-    state._windowCloneManager?.sync();
+    state.layer.sync({
+      x: visualX, y: visualY, width: visualW, height: visualH,
+      monitor,
+      expand: this._glassExpand,
+    });
   }
 
   // ── Effect remove / cleanup ─────────────────────────────────────────────────
@@ -575,8 +396,8 @@ export class OsdManager {
     if (!this._isEffectActive) return;
     this._isEffectActive = false;
 
-    this._stopAdaptiveColorSampling();
-    this._clearAdaptiveStyles();
+    this._adaptiveText?.stop();
+    this._adaptiveText?.clear();
 
     if (this._monitorsChangedId !== 0) {
       Main.layoutManager.disconnect(this._monitorsChangedId);
@@ -610,26 +431,8 @@ export class OsdManager {
       } catch (e) { }
     }
 
-    // DESTROY EFFECT FIRST (before bgActor.destroy())
-    if (state.effect) {
-      try { state.effect.cleanup(); } catch (e) { }
-      state.effect = null;
-    }
-
-    // DESTROY ACTOR HIERARCHY — cascades through liquidBox → _cloneContainer
-    if (state.bgActor) {
-      try { state.bgActor.hide(); } catch (e) { }
-      try { state.bgActor.destroy(); } catch (e) { }
-      state.bgActor = null;
-    }
-    state.liquidBox = null;
-    state._cloneContainer = null;
-
-    // Clean up managers
-    try { state._uiSampler?.destroy(); } catch (e) { }
-    state._uiSampler = null;
-    try { state._windowCloneManager?.destroy(); } catch (e) { }
-    state._windowCloneManager = null;
+    state.layer?.destroy();
+    state.layer = null;
   }
 
   cleanup() {
@@ -642,193 +445,30 @@ export class OsdManager {
 
   // ── Adaptive text colour helpers ────────────────────────────────────────────
 
-  _collectAdaptiveTextTargets() {
-    let targets: Clutter.Actor[] = [];
-    for (let state of this._osdStates) {
-      if (state.osdWindow && state.osdWindow.opacity > 0 && state.osdWindow.visible) {
-        this._findAllTextActors(state.targetBox, targets);
-      }
-    }
-    return targets;
-  }
-
-  _findAllTextActors(actor: St.Widget, foundActors: Clutter.Actor[] = []) {
-    if (!actor) return foundActors;
-
-    let isProgressBar = actor.has_style_class_name && actor.has_style_class_name('level');
-    if (actor instanceof St.Label || actor instanceof Clutter.Text ||
-      actor instanceof St.Button || actor instanceof St.Icon || isProgressBar) {
-      if (actor.visible) foundActors.push(actor);
-    }
-
-    let children = actor.get_children() as St.Widget[];
-    for (let i = 0; i < children.length; i++) {
-      this._findAllTextActors(children[i], foundActors);
-    }
-    return foundActors;
-  }
-
-  _setActorColor(actor: CustomBannerActor, color: string, skipAnimations = false) {
-    if (!actor || typeof actor.set_style !== 'function') return;
-    if (actor._currentTargetColor === color) return;
-    actor._currentTargetColor = color;
-    this._animateActorColor(actor, color, 380, skipAnimations);
-  }
-
-  _clearAdaptiveStyles() {
-    for (const [actor, style] of this._styledActors.entries() as MapIterator<[CustomBannerActor, string]>) {
-      if (actor && typeof actor.set_style === 'function') {
-        if (actor._colorTweenId) {
-          GLib.source_remove(actor._colorTweenId);
-          actor._colorTweenId = undefined;
-        }
-        actor._currentTargetColor = undefined;
-        actor.remove_style_class_name('adaptive-text-transition');
-        actor.remove_style_class_name('adaptive-color-light');
-        actor.remove_style_class_name('adaptive-color-dark');
-        actor.set_style(style);
-      }
-    }
-    this._styledActors.clear();
-  }
-
-  _applyAdaptiveColorMap(colorMap: Map<Clutter.Actor, string>, skipAnimations = false) {
-    if (!colorMap || colorMap.size === 0) return;
-    for (const [actor, color] of colorMap.entries()) {
-      this._setActorColor(actor as unknown as CustomBannerActor, color, skipAnimations);
-    }
-  }
-
-  _startAdaptiveColorSampling() {
-    if (!this._adaptiveConfig.enabled) return;
-    this._updateAdaptiveTextColors();
-    if (this._adaptiveTimerId !== 0) return;
-
-    this._adaptiveTimerId = GLib.timeout_add(
-      GLib.PRIORITY_DEFAULT,
-      this._adaptiveConfig.sampleIntervalMs,
-      () => {
-        let isActive = this._osdStates.some(s => s.osdWindow && s.osdWindow.visible);
-        if (isActive) this._updateAdaptiveTextColors();
-        return GLib.SOURCE_CONTINUE;
-      }
-    );
-  }
-
-  _stopAdaptiveColorSampling() {
-    if (this._adaptiveTimerId !== 0) {
-      GLib.source_remove(this._adaptiveTimerId);
-      this._adaptiveTimerId = 0;
-    }
-  }
-
-  _updateAdaptiveTextColors() {
-    if (!this._adaptiveConfig.enabled || this._adaptiveInFlight) return;
-
-    const targets = this._collectAdaptiveTextTargets();
-    if (targets.length === 0) return;
-
-    this._adaptiveInFlight = true;
-    let isFirst = this._isFirstAdaptiveRun;
-    this._isFirstAdaptiveRun = false;
-
-    this._contrastSampler
-      .chooseColorsForActors(targets, this._adaptiveConfig)
-      .then(colorMap => {
-        this._applyAdaptiveColorMap(colorMap, isFirst);
-      })
-      .catch(e => {
-        this._logger.error(`[Liquid Glass] OSD adaptive color update failed: ${e}`);
-      })
-      .finally(() => {
-        this._adaptiveInFlight = false;
-      });
-  }
-
-  _hexToRgb(hex: string) {
-    let bigint = parseInt(hex.replace('#', ''), 16);
-    return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
-  }
-
-  _rgbToHex(r: number, g: number, b: number) {
-    return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1);
-  }
-
-  _animateActorColor(actor: CustomBannerActor, targetHexColor: string, durationMs = 380, skipAnimations = false) {
-    if (!actor || Object.keys(actor).length === 0) return;
-
-    if (actor._colorTweenId) {
-      GLib.source_remove(actor._colorTweenId);
-      actor._colorTweenId = undefined;
-    }
-
-    let themeNode = actor.get_theme_node();
-    let startColor = themeNode.get_foreground_color();
-    let startBgColor = themeNode.get_background_color();
-    let targetRgb = this._hexToRgb(targetHexColor);
-
-    // OSD-specific: BarLevel progress bar colour interpolation
-    let isProgressBar = actor.has_style_class_name && actor.has_style_class_name('level');
-    let trackTargetRgb = targetRgb;
-
-    if (isProgressBar) {
-      let lightHex = this._adaptiveConfig?.lightTextColor || '#ffffff';
-      let darkHex = this._adaptiveConfig?.darkTextColor || '#000000';
-      let isTargetLight = targetHexColor.toLowerCase() === lightHex.toLowerCase();
-      let otherRgb = this._hexToRgb(isTargetLight ? darkHex : lightHex);
-      let lerpRatio = 0.7;
-      trackTargetRgb = {
-        r: Math.round(targetRgb.r + (otherRgb.r - targetRgb.r) * lerpRatio),
-        g: Math.round(targetRgb.g + (otherRgb.g - targetRgb.g) * lerpRatio),
-        b: Math.round(targetRgb.b + (otherRgb.b - targetRgb.b) * lerpRatio),
-      };
-    }
-
-    if (skipAnimations) {
-      let finalHex = this._rgbToHex(targetRgb.r, targetRgb.g, targetRgb.b);
-      if (isProgressBar) {
-        let finalBgHex = this._rgbToHex(trackTargetRgb.r, trackTargetRgb.g, trackTargetRgb.b);
-        actor.set_style(`-barlevel-active-background-color: ${finalHex}; -barlevel-background-color: ${finalBgHex};`);
-      } else {
-        actor.set_style(`color: ${finalHex}; -st-icon-foreground-color: ${finalHex};`);
-      }
-      return;
-    }
-
-    let startTime = GLib.get_monotonic_time();
-    actor._colorTweenId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
-      if (!actor || Object.keys(actor).length === 0) return GLib.SOURCE_REMOVE;
-
-      let currentTime = GLib.get_monotonic_time();
-      let elapsedMs = (currentTime - startTime) / 1000;
-      let progress = Math.min(elapsedMs / durationMs, 1.0);
-      let ease = progress < 0.5
-        ? 2 * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-
-      let r = Math.round(startColor.red + (targetRgb.r - startColor.red) * ease);
-      let g = Math.round(startColor.green + (targetRgb.g - startColor.green) * ease);
-      let b = Math.round(startColor.blue + (targetRgb.b - startColor.blue) * ease);
-      let currentHex = this._rgbToHex(r, g, b);
-
-      if (isProgressBar) {
-        let bgR = Math.round(startBgColor.red + (trackTargetRgb.r - startBgColor.red) * ease);
-        let bgG = Math.round(startBgColor.green + (trackTargetRgb.g - startBgColor.green) * ease);
-        let bgB = Math.round(startBgColor.blue + (trackTargetRgb.b - startBgColor.blue) * ease);
-        actor.set_style(`-barlevel-active-background-color: ${currentHex}; -barlevel-background-color: ${this._rgbToHex(bgR, bgG, bgB)};`);
-      } else {
-        actor.set_style(`color: ${currentHex}; -st-icon-foreground-color: ${currentHex};`);
-      }
-
-      if (progress >= 1.0) {
-        actor._colorTweenId = undefined;
-        return GLib.SOURCE_REMOVE;
-      }
-      return GLib.SOURCE_CONTINUE;
-    });
-  }
-
   _laterAdd(laterType: Meta.LaterType, callback: GLib.SourceFunc) {
     return global.compositor?.get_laters?.().add(laterType, callback);
   }
+  /** One region per visible OSD; each is a single small box, so no cards. */
+  _buildAdaptiveGroups(): AdaptiveGroup[] {
+    const groups: AdaptiveGroup[] = [];
+    for (const state of this._osdStates) {
+      if (!state.osdWindow?.visible || state.osdWindow.opacity === 0) continue;
+      const targets = findTextActors(state.targetBox);
+      if (targets.length > 0) groups.push({ key: state.targetBox, targets });
+    }
+    return groups;
+  }
+
+  _createAdaptiveText() {
+    this._adaptiveText?.destroy();
+    this._adaptiveText = new AdaptiveTextController({
+      settings: this._settings,
+      logger: this._logger,
+      enabledKey: 'popup-enable-adaptive-text-color',
+      intervalKey: 'popup-sample-interval-ms',
+      collectGroups: () => this._buildAdaptiveGroups(),
+      shouldSample: () => this._osdStates.some(s => s.osdWindow?.visible),
+    });
+  }
+
 }

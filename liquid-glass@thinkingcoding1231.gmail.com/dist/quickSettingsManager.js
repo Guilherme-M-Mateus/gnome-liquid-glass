@@ -1,16 +1,16 @@
 // src/quickSettingsManager.ts
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
-import { LiquidEffect } from './liquidEffect.js';
-import { StageContrastSampler, AdaptiveContrastConfig } from './contrastSampler.js';
-import { UnpickableActor, UILayerSampler, WindowCloneManager, } from './utils.js';
+import { GlassLayer } from './glassSurface.js';
+import { AdaptiveTextController, groupByCard } from './adaptiveText.js';
 // ========== Configuration Parameters ==========
 // Transparent padding outside the glass area.
 // This prevents the shader distortion or rounded corners from being clipped by the actor bounds.
 const SHADER_PADDING = 20;
+// Tiles and sliders Quick Settings paints over the glass.
+const QS_CARD_CLASSES = ['quick-slider', 'quick-toggle', 'quick-menu-toggle', 'quick-settings-system-item'];
 // Adaptive text color flags
 const SAMPLE_PER_ELEMENT = false;
 // ==============================================
@@ -27,6 +27,7 @@ export class QuickSettingsManager {
     effect;
     _windowCloneManager = null;
     _uiSampler = null;
+    layer = null;
     // Cached monitor dimensions for change detection
     _lastScreenW;
     _lastScreenH;
@@ -41,21 +42,9 @@ export class QuickSettingsManager {
     _glassExpand;
     _menuXoffset;
     _menuYoffset;
-    // Spring physics parameters
-    _springScale;
-    _springPos;
-    _springStiffness;
-    _springDamping;
-    _springMass;
-    _enableAnimation;
-    _tickId;
-    _contrastSampler;
-    _adaptiveTimerId;
-    _adaptiveInFlight;
-    _styledActors;
+    _adaptiveText = null;
     _hasAutoRefreshed;
     _settingsSignals;
-    _adaptiveConfig;
     // Used in _syncGeometry
     _stableBaseW;
     _stableBaseH;
@@ -66,7 +55,6 @@ export class QuickSettingsManager {
     _lastBgX;
     _lastBgY;
     _cornerRadius = 0;
-    _animationInterval = 16;
     // Flag to forcefully move submenus using translation_x, translation_y
     _enableSubmenuFix = false;
     _cachedSubmenus = null; // Cache of submenus
@@ -88,19 +76,6 @@ export class QuickSettingsManager {
         this._glassExpand = 0;
         this._menuXoffset = 0;
         this._menuYoffset = 0;
-        // Custom spring physics parameters for the open/close animation
-        // Spring(stiffness, damping, mass)
-        this._springScale = new Spring(120, 8, 1.0);
-        this._springPos = new Spring(300, 12, 1.0);
-        this._springStiffness = 120;
-        this._springDamping = 8;
-        this._springMass = 1.0;
-        this._enableAnimation = true;
-        this._tickId = 0;
-        this._contrastSampler = new StageContrastSampler();
-        this._adaptiveTimerId = 0;
-        this._adaptiveInFlight = false;
-        this._styledActors = new Map();
         this._settingsSignals = [];
         this.buttonAlpha = 0.8;
         this._buttonTimerId = 0;
@@ -112,13 +87,6 @@ export class QuickSettingsManager {
         if (!this._settings)
             return;
         this._bindSettings();
-        // Setup spring parameters
-        this._enableAnimation = this._settings.get_boolean('enable-quick-settings-animation');
-        this._springStiffness = this._settings.get_double('quick-settings-spring-stiffness');
-        this._springDamping = this._settings.get_double('quick-settings-spring-damping');
-        this._springMass = this._settings.get_double('quick-settings-spring-mass');
-        this._springScale.updateParams(this._springStiffness, this._springDamping, this._springMass);
-        this._springPos.updateParams(this._springStiffness, this._springDamping, this._springMass);
         if (this._settings.get_boolean('enable-quick-settings-glass')) {
             this._applyEffect();
         }
@@ -158,52 +126,31 @@ export class QuickSettingsManager {
             else if (!enabled && this._isEffectActive)
                 this._removeEffect();
         });
-        connectSetting('enable-quick-settings-animation', () => {
-            this._enableAnimation = this._settings.get_boolean('enable-quick-settings-animation');
-        });
-        connectSetting('quick-settings-spring-stiffness', () => {
-            this._springStiffness = this._settings.get_double('quick-settings-spring-stiffness');
-            if (this._springScale)
-                this._springScale.updateParams(this._springStiffness, this._springDamping, this._springMass);
-        });
-        connectSetting('quick-settings-spring-damping', () => {
-            this._springDamping = this._settings.get_double('quick-settings-spring-damping');
-            if (this._springScale)
-                this._springScale.updateParams(this._springStiffness, this._springDamping, this._springMass);
-        });
-        connectSetting('quick-settings-spring-mass', () => {
-            this._springMass = this._settings.get_double('quick-settings-spring-mass');
-            if (this._springScale)
-                this._springScale.updateParams(this._springStiffness, this._springDamping, this._springMass);
-        });
-        connectSetting('quick-settings-animation-interval-ms', () => {
-            this._animationInterval = this._settings.get_int('quick-settings-animation-interval-ms');
-        });
-        connectSetting('quick-settings-tint-color', () => {
+        connectSetting('popup-tint-color', () => {
             if (this.effect) {
-                let colorArray = this._hexToColorArray(this._settings.get_string('quick-settings-tint-color'));
+                let colorArray = this._hexToColorArray(this._settings.get_string('popup-tint-color'));
                 this.effect.setTintColor(...colorArray);
             }
         });
-        connectSetting('quick-settings-tint-strength', () => {
+        connectSetting('popup-tint-strength', () => {
             if (this.effect) {
-                this.effect.setTintStrength(this._settings.get_double('quick-settings-tint-strength'));
+                this.effect.setTintStrength(this._settings.get_double('popup-tint-strength'));
             }
         });
-        connectSetting('quick-settings-blur-radius', () => {
+        connectSetting('popup-blur-radius', () => {
             if (this.effect) {
-                this.effect.setBlurRadius(this._settings.get_int('quick-settings-blur-radius'));
+                this.effect.setBlurRadius(this._settings.get_int('popup-blur-radius'));
             }
         });
-        connectSetting('quick-settings-corner-radius', () => {
+        connectSetting('popup-corner-radius', () => {
             if (this.effect) {
-                this._cornerRadius = this._settings.get_double('quick-settings-corner-radius');
+                this._cornerRadius = this._settings.get_double('popup-corner-radius');
                 this.effect.setCornerRadius(this._cornerRadius);
             }
         });
-        connectSetting('quick-settings-glass-expand', () => {
+        connectSetting('popup-glass-expand', () => {
             if (this.effect) {
-                this._glassExpand = this._settings.get_int('quick-settings-glass-expand');
+                this._glassExpand = this._settings.get_int('popup-glass-expand');
             }
         });
         connectSetting('quick-settings-y-offset', () => {
@@ -218,26 +165,26 @@ export class QuickSettingsManager {
                 this._applyMenuOffsets();
             }
         });
-        connectSetting('quick-settings-enable-adaptive-text-color', () => {
-            this._adaptiveConfig.enabled = this._settings.get_boolean('quick-settings-enable-adaptive-text-color');
+        connectSetting('popup-enable-adaptive-text-color', () => {
+            this._adaptiveText?.syncSettings();
         });
-        connectSetting('quick-settings-sample-interval-ms', () => {
-            this._adaptiveConfig.sampleIntervalMs = this._settings.get_int('quick-settings-sample-interval-ms');
+        connectSetting('popup-sample-interval-ms', () => {
+            this._adaptiveText?.syncSettings();
         });
         // Brightness / Saturation / Contrast — dynamic application from settings
-        connectSetting('quick-settings-brightness', () => {
+        connectSetting('popup-brightness', () => {
             if (this.effect) {
-                this.effect.setBrightness(this._settings.get_double('quick-settings-brightness'));
+                this.effect.setBrightness(this._settings.get_double('popup-brightness'));
             }
         });
-        connectSetting('quick-settings-saturation', () => {
+        connectSetting('popup-saturation', () => {
             if (this.effect) {
-                this.effect.setSaturation(this._settings.get_double('quick-settings-saturation'));
+                this.effect.setSaturation(this._settings.get_double('popup-saturation'));
             }
         });
-        connectSetting('quick-settings-contrast', () => {
+        connectSetting('popup-contrast', () => {
             if (this.effect) {
-                this.effect.setContrast(this._settings.get_double('quick-settings-contrast'));
+                this.effect.setContrast(this._settings.get_double('popup-contrast'));
             }
         });
     }
@@ -255,47 +202,17 @@ export class QuickSettingsManager {
         if (this._isEffectActive)
             return;
         this._isEffectActive = true;
+        // Adaptive text colouring — shared implementation, see src/adaptiveText.ts
+        this._createAdaptiveText();
         if (!this.targetActor)
             return;
         // Shift the menu down to prevent it from clipping into the top bar
         this._menuYoffset = this._settings.get_int('quick-settings-y-offset');
         this._menuXoffset = this._settings.get_int('quick-settings-x-offset');
-        this._glassExpand = this._settings.get_int('quick-settings-glass-expand');
-        this._animationInterval = this._settings.get_int('quick-settings-animation-interval-ms');
-        this._adaptiveConfig = {
-            ...AdaptiveContrastConfig,
-            enabled: this._settings.get_boolean('quick-settings-enable-adaptive-text-color'),
-            samplePerElement: SAMPLE_PER_ELEMENT,
-            sampleIntervalMs: this._settings.get_int('quick-settings-sample-interval-ms'),
-        };
-        // ── 1. bgActor: full monitor, no effect ──────────────────────────────────
-        // Create the main background actor that covers the full monitor
-        this.bgActor = new UnpickableActor();
-        this.bgActor.set_name('liquid-glass-bg-actor');
-        // Set an initial size of 1x1. Passing a 0x0 size to the Cogl engine 
-        // while applying a shader will immediately crash the GNOME Shell.
-        this.bgActor.set_size(1.0, 1.0);
-        this.bgActor.set_pivot_point(0.0, 0.0);
-        // ── 2. liquidBox: outer layer — LiquidEffect with built-in dual-Kawase blur ─
-        this.liquidBox = new UnpickableActor();
-        this.liquidBox.set_name('liquid-box');
-        this.liquidBox.set_clip_to_allocation(true);
-        this.bgActor.add_child(this.liquidBox);
-        // dummyBreaker: prevents BMS black-screen optimization bug
-        let dummyBreaker = new UnpickableActor();
-        dummyBreaker.set_name('optimization-breaker');
-        dummyBreaker.set_size(1.0, 1.0);
-        dummyBreaker.set_opacity(0);
-        this.liquidBox.add_child(dummyBreaker);
-        // ── 3. _cloneContainer: sub-container inside liquidBox ────────────────────
-        this._cloneContainer = new UnpickableActor();
-        this._cloneContainer.set_name('clone-container');
-        this.liquidBox.add_child(this._cloneContainer);
-        // Scale pivot points
-        // The menu scales from the top-center (0.5, 0.0)
+        this._glassExpand = this._settings.get_int('popup-glass-expand');
+        // The menu scales from top-centre; our glass from top-left, since we sync
+        // its exact coordinates each frame.
         this.animActor.set_pivot_point(0.5, 0.0);
-        // bgActor scales from the top-left (0.0, 0.0) because we manually sync its exact coordinates
-        this.bgActor.set_pivot_point(0.0, 0.0);
         // ── Find the menuActor's ancestor that is a direct child of uiGroup ───────
         let menuRoot = this.menu.actor;
         while (menuRoot.get_parent() && menuRoot.get_parent() !== Main.layoutManager.uiGroup) {
@@ -304,41 +221,22 @@ export class QuickSettingsManager {
                 break;
             menuRoot = p;
         }
-        // Insert bgActor below menuRoot in uiGroup to prevent recursive clone loops
-        // Insert the custom background *underneath* the actual menu UI
-        if (menuRoot.get_parent() === Main.layoutManager.uiGroup) {
-            Main.layoutManager.uiGroup.insert_child_below(this.bgActor, menuRoot);
-        }
-        else {
-            // Fallback: If it has no parent yet, add it directly to the UI group
-            Main.layoutManager.uiGroup.add_child(this.bgActor);
-        }
-        // ── 5. Read effect parameters from settings ───────────────────────────────
-        let blurRadius = this._settings.get_int('quick-settings-blur-radius');
-        let tintColorStr = this._settings.get_string('quick-settings-tint-color');
-        let tintStrength = this._settings.get_double('quick-settings-tint-strength');
-        this._cornerRadius = this._settings.get_double('quick-settings-corner-radius');
-        let brightness = this._settings.get_double('quick-settings-brightness');
-        let saturation = this._settings.get_double('quick-settings-saturation');
-        let contrast = this._settings.get_double('quick-settings-contrast');
-        // LiquidEffect on liquidBox (includes built-in dual-Kawase blur)
-        // Apply our custom GLSL liquid shader to the outer background actor
-        this.effect = new LiquidEffect({ extensionPath: this.extensionPath, settings: this._settings });
-        // Tell the shader about the padding so it calculates refraction coordinates correctly
-        this.effect.setPadding(SHADER_PADDING);
-        this.effect.setTintColor(...this._hexToColorArray(tintColorStr));
-        this.effect.setTintStrength(tintStrength);
-        this.effect.setCornerRadius(this._cornerRadius);
-        this.effect.setIsDock(false);
-        this.effect.setBrightness(brightness);
-        this.effect.setSaturation(saturation);
-        this.effect.setContrast(contrast);
-        this.effect.setBlurRadius(blurRadius);
-        this.liquidBox.add_effect(this.effect);
-        // ── 5. WindowCloneManager + UILayerSampler ────────────────────────────────
-        this._windowCloneManager = new WindowCloneManager(this.liquidBox, this._cloneContainer);
-        this._uiSampler = new UILayerSampler(this.bgActor, this.liquidBox, [menuRoot, global.windowGroup, global.window_group], this._cloneContainer);
-        this.bgActor.hide();
+        this._cornerRadius = this._settings.get_double('popup-corner-radius');
+        // Actor tree, shader and clone samplers — all shared, see glassSurface.ts.
+        this.layer = new GlassLayer({
+            extensionPath: this.extensionPath,
+            settings: this._settings,
+            logger: this._logger,
+            keyPrefix: 'popup',
+            root: menuRoot,
+        });
+        this.bgActor = this.layer.bgActor;
+        this.liquidBox = this.layer.liquidBox;
+        this._cloneContainer = this.layer.cloneContainer;
+        this.effect = this.layer.effect;
+        this._windowCloneManager = this.layer.windowClones;
+        this._uiSampler = this.layer.uiSampler;
+        this.layer.hide();
         // ── Helper functions for GNOME's render pipeline ──────────────────────────
         const laterAdd = (laterType, callback) => {
             return global.compositor?.get_laters?.().add(laterType, callback);
@@ -407,16 +305,14 @@ export class QuickSettingsManager {
                 this._stableBaseH = undefined;
                 startFrameSync();
                 // Skip animations on the first open for instant feedback
-                this._startAdaptiveColorSampling(true);
+                this._adaptiveText?.start();
                 this._startButtonAlphaSampling();
-                this._startAnimation(1);
                 return;
             }
             this._applyClassStyles();
             this._applyMenuOffsets();
-            this._stopAdaptiveColorSampling();
+            this._adaptiveText?.stop();
             this._stopButtonAlphaSampling();
-            this._startAnimation(0);
         });
         // Monitor the signal when the menu's mapped state changes
         // Stop the render loop when the menu unmaps (fully hidden)
@@ -427,13 +323,13 @@ export class QuickSettingsManager {
                 if (!this.menu.actor.mapped) {
                     // Stop the render/sync loop here for the first time
                     stopFrameSync();
-                    // Ensure cleanup is done reliably
+                    // Only our own actor is reset here. The menu's opacity belongs to
+                    // GNOME's open/close transition now — zeroing it used to be undone by
+                    // the custom spring on the next open, so with that gone it would stay
+                    // at 0 and the panel would open empty.
                     if (this.bgActor) {
                         this.bgActor.hide();
                         this.bgActor.opacity = 0;
-                    }
-                    if (this.animActor) {
-                        this.animActor.opacity = 0;
                     }
                 }
             })
@@ -455,26 +351,22 @@ export class QuickSettingsManager {
         }
         if (!this.bgActor.visible)
             this.bgActor.show();
-        if (!this._enableAnimation) {
-            if (this.targetActor !== null)
-                this.bgActor.opacity = this.targetActor.get_first_child()?.opacity ?? 255;
-        }
+        // GNOME animates the wrapper directly under the BoxPointer; the glass
+        // mirrors its opacity.
+        if (this.targetActor !== null)
+            this.bgActor.opacity = this.targetActor.get_first_child()?.opacity ?? 255;
         let [inW, inH] = this.animActor.get_size();
         let [outW, outH] = this.targetActor.get_size();
         inW = Number.isNaN(inW) || inW <= 0 ? (this._stableBaseW || 1) : inW;
         inH = Number.isNaN(inH) || inH <= 0 ? (this._stableBaseH || 1) : inH;
         let [scaleX, scaleY] = this.animActor.get_scale();
-        if (!this._enableAnimation) {
-            // For default GNOME animation: the transparent wrapper directly under BoxPointer is the actual animated entity
+        // Same wrapper carries GNOME's open/close scale.
+        {
             let gnomeAnimContainer = this.targetActor.get_first_child();
             if (gnomeAnimContainer) {
                 scaleX *= gnomeAnimContainer.scale_x;
                 scaleY *= gnomeAnimContainer.scale_y;
             }
-        }
-        else {
-            scaleX *= this.targetActor.get_scale()[0];
-            scaleY *= this.targetActor.get_scale()[1];
         }
         let themeNode = this.animActor.get_theme_node();
         let mL = themeNode ? themeNode.get_margin(St.Side.LEFT) : 0;
@@ -605,187 +497,6 @@ export class QuickSettingsManager {
     // Utility function to safely check if an actor has a specific style class
     _hasStyleClass(actor, className) {
         return actor instanceof St.Widget && actor.has_style_class_name(className);
-    }
-    _collectAdaptiveTextTargets(actor = this.menu?.actor, targets = []) {
-        if (!actor)
-            return targets;
-        return this._findAllTextActors(this.menu?.actor);
-    }
-    _findAllTextActors(actor, foundActors = []) {
-        if (!actor)
-            return foundActors;
-        // Collect applicable text or button elements that are currently visible
-        if (actor instanceof St.Label || actor instanceof Clutter.Text ||
-            actor instanceof St.Button || actor instanceof St.Icon) {
-            if (actor.visible)
-                foundActors.push(actor);
-        }
-        // Recursively scan child elements
-        let children = typeof actor.get_children === 'function' ? actor.get_children() : [];
-        for (let i = 0; i < children.length; i++) {
-            this._findAllTextActors(children[i], foundActors);
-        }
-        return foundActors;
-    }
-    // Initiates the color change for a specific actor
-    _setActorColor(actor, color, skipAnimations = false) {
-        if (!actor || typeof actor.set_style !== 'function')
-            return;
-        if (!this._styledActors.has(actor)) {
-            let origStyle = typeof actor.get_style === 'function' ? actor.get_style() : null;
-            this._styledActors.set(actor, origStyle || '');
-            actor.connect('destroy', () => {
-                if (actor._colorTweenId) {
-                    GLib.source_remove(actor._colorTweenId);
-                    actor._colorTweenId = undefined;
-                }
-                this._styledActors.delete(actor);
-            });
-        }
-        let isInsensitive = false;
-        if (actor instanceof St.Button) {
-            isInsensitive = (actor.reactive === false) ||
-                (typeof actor.has_style_pseudo_class === 'function' && actor.has_style_pseudo_class('insensitive'));
-        }
-        if (actor._currentTargetColor === color && actor._currentInsensitiveState === isInsensitive)
-            return;
-        actor._currentTargetColor = color;
-        actor._currentInsensitiveState = isInsensitive;
-        this._animateActorColor(actor, color, isInsensitive, 380, skipAnimations);
-    }
-    _clearAdaptiveStyles() {
-        for (const [actor, originalStyle] of this._styledActors.entries()) {
-            if (actor && typeof actor.set_style === 'function') {
-                if (actor._colorTweenId) {
-                    GLib.source_remove(actor._colorTweenId);
-                    actor._colorTweenId = undefined;
-                }
-                actor._currentTargetColor = undefined;
-                actor._currentInsensitiveState = undefined;
-                actor.remove_style_class_name('adaptive-text-transition');
-                actor.remove_style_class_name('adaptive-color-light');
-                actor.remove_style_class_name('adaptive-color-dark');
-                actor.set_style(originalStyle || null);
-            }
-        }
-        this._styledActors.clear();
-        const currentTargets = this._collectAdaptiveTextTargets();
-        for (let actor of currentTargets) {
-            if (actor && typeof actor.set_style === 'function') {
-                if (actor._colorTweenId) {
-                    GLib.source_remove(actor._colorTweenId);
-                    actor._colorTweenId = undefined;
-                }
-                actor._currentTargetColor = undefined;
-                actor._currentInsensitiveState = undefined;
-                actor.set_style(null);
-            }
-        }
-    }
-    // Iterates through the color map and applies the new target colors to the respective actors
-    _applyAdaptiveColorMap(colorMap, skipAnimations = false) {
-        if (!colorMap || colorMap.size === 0)
-            return;
-        for (const [actor, color] of colorMap.entries()) {
-            this._setActorColor(actor, color, skipAnimations);
-        }
-    }
-    // Starts the timer for periodically sampling contrast and updating adaptive text colors
-    _startAdaptiveColorSampling(skipAnimations = false) {
-        if (!this._adaptiveConfig.enabled)
-            return;
-        this._updateAdaptiveTextColors(skipAnimations);
-        if (this._adaptiveTimerId !== 0)
-            return;
-        this._adaptiveTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._adaptiveConfig.sampleIntervalMs, () => {
-            if (!this.menu?.isOpen) {
-                this._adaptiveTimerId = 0;
-                return GLib.SOURCE_REMOVE;
-            }
-            this._updateAdaptiveTextColors(false);
-            return GLib.SOURCE_CONTINUE;
-        });
-    }
-    // Stops the adaptive color sampling timer
-    _stopAdaptiveColorSampling() {
-        if (this._adaptiveTimerId !== 0) {
-            GLib.source_remove(this._adaptiveTimerId);
-            this._adaptiveTimerId = 0;
-        }
-    }
-    // Collects target actors, samples their contrast, and triggers color updates
-    _updateAdaptiveTextColors(skipAnimations = false) {
-        if (!this._adaptiveConfig.enabled || this._adaptiveInFlight)
-            return;
-        const targets = this._collectAdaptiveTextTargets();
-        if (targets.length === 0)
-            return;
-        this._adaptiveInFlight = true;
-        this._contrastSampler
-            .chooseColorsForActors(targets, this._adaptiveConfig)
-            .then(colorMap => {
-            this._applyAdaptiveColorMap(colorMap, skipAnimations);
-        })
-            .catch(e => {
-            this._logger.error(`[Liquid Glass] Quick Settings adaptive color update failed: ${e}`);
-        })
-            .finally(() => {
-            this._adaptiveInFlight = false;
-        });
-    }
-    _hexToRgb(hex) {
-        let bigint = parseInt(hex.replace('#', ''), 16);
-        return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
-    }
-    _rgbToHex(r, g, b) {
-        return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1);
-    }
-    _animateActorColor(actor, targetHexColor, isInsensitive, durationMs = 380, skipAnimations = false) {
-        if (!actor || Object.keys(actor).length === 0)
-            return;
-        if (actor._colorTweenId) {
-            GLib.source_remove(actor._colorTweenId);
-            actor._colorTweenId = undefined;
-        }
-        let themeNode = actor.get_theme_node();
-        let startColor = themeNode.get_foreground_color();
-        let targetRgb = this._hexToRgb(targetHexColor);
-        let targetAlpha = isInsensitive ? 0.5 : 1.0;
-        let startAlpha = startColor.alpha / 255.0;
-        if (skipAnimations) {
-            let alphaStr = targetAlpha.toFixed(3);
-            let targetRgba = `rgba(${targetRgb.r}, ${targetRgb.g}, ${targetRgb.b}, ${alphaStr})`;
-            actor.set_style(`color: ${targetRgba}; -st-icon-foreground-color: ${targetRgba};`);
-            return;
-        }
-        let startTime = GLib.get_monotonic_time();
-        actor._colorTweenId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 32, () => {
-            if (!actor || Object.keys(actor).length === 0)
-                return GLib.SOURCE_REMOVE;
-            let currentTime = GLib.get_monotonic_time();
-            let elapsedMs = (currentTime - startTime) / 1000;
-            let progress = Math.min(elapsedMs / durationMs, 1.0);
-            // Standard ease-in-out easing function
-            let ease = progress < 0.5
-                ? 2 * progress * progress
-                : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-            // Linearly interpolate (lerp) each RGB channel individually
-            let r = Math.round(startColor.red + (targetRgb.r - startColor.red) * ease);
-            let g = Math.round(startColor.green + (targetRgb.g - startColor.green) * ease);
-            let b = Math.round(startColor.blue + (targetRgb.b - startColor.blue) * ease);
-            // Interpolate the alpha value and generate the rgba() format
-            // Safely clamp between 0.0 and 1.0
-            let a = Math.max(0.0, Math.min(1.0, startAlpha + (targetAlpha - startAlpha) * ease));
-            // Up to 3 decimal places for CSS
-            let currentRgba = `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
-            // Override text color and icon foreground color directly using inline CSS
-            actor.set_style(`color: ${currentRgba}; -st-icon-foreground-color: ${currentRgba};`);
-            if (progress >= 1.0) {
-                actor._colorTweenId = undefined;
-                return GLib.SOURCE_REMOVE;
-            }
-            return GLib.SOURCE_CONTINUE;
-        });
     }
     // ── Button alpha sampling (QuickSettings-specific) ─────────────────────────
     _findAllButtons(actor, foundButtons = []) {
@@ -945,108 +656,6 @@ export class QuickSettingsManager {
         }
         this._styledButtons.clear();
     }
-    // ── Spring animation (QuickSettings-specific) ──────────────────────────────
-    _startAnimation(targetValue) {
-        if (this._tickId !== 0) {
-            GLib.source_remove(this._tickId);
-            this._tickId = 0;
-        }
-        if (!this._enableAnimation) {
-            if (this.bgActor) {
-                this.bgActor.remove_all_transitions();
-                this.bgActor.opacity = 255;
-                this.bgActor.set_scale(1.0, 1.0);
-                if (this.animActor) {
-                    this.animActor.set_scale(1.0, 1.0);
-                    this.animActor.opacity = 255;
-                }
-            }
-            return;
-        }
-        if (this.animActor)
-            this.animActor.remove_all_transitions();
-        if (this.bgActor)
-            this.bgActor.remove_all_transitions();
-        this._springScale.target = targetValue;
-        this._springPos.target = targetValue;
-        if (this._tickId === 0) {
-            let lastTime = GLib.get_monotonic_time();
-            this._tickId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._animationInterval, () => {
-                if (!this.bgActor || !this.targetActor) {
-                    this._tickId = 0;
-                    return GLib.SOURCE_REMOVE;
-                }
-                let currentTime = GLib.get_monotonic_time();
-                let elapsedMs = (currentTime - lastTime) / 1000;
-                lastTime = currentTime;
-                let isClosing = (this._springScale.target === 0);
-                let dt = elapsedMs / 1000;
-                if (dt > 0.033)
-                    dt = 0.033;
-                let stopped = false;
-                let s, p;
-                if (isClosing) {
-                    // Use a simple exponential decay for closing (faster, no bounce)
-                    let speed = 15.0;
-                    this._springScale.value += (0 - this._springScale.value) * (1.0 - Math.exp(-speed * dt));
-                    this._springPos.value += (0 - this._springPos.value) * (1.0 - Math.exp(-speed * dt));
-                    s = this._springScale.value;
-                    p = this._springPos.value;
-                    // Stop animation completely when it's virtually invisible
-                    if (s < 0.005) {
-                        s = 0;
-                        p = 0;
-                        stopped = true;
-                    }
-                }
-                else {
-                    // Use Hooke's law spring physics for opening (creates a nice bounce effect)
-                    stopped = this._springScale.update(elapsedMs) && this._springPos.update(elapsedMs);
-                    s = this._springScale.value;
-                    p = this._springPos.value;
-                    // Magnet effect: Snap to exactly 1.0 when the bounce is almost settled.
-                    // This prevents indefinite micro-stuttering at the end of the animation.
-                    if (Math.abs(1.0 - s) < 0.002 && Math.abs(this._springScale.velocity) < 0.03) {
-                        s = 1.0;
-                        p = 1.0;
-                        stopped = true;
-                    }
-                }
-                let currentScale;
-                let opacity;
-                if (isClosing) {
-                    // Clamp to 0.001 because scale = 0 crashes Cogl
-                    currentScale = Math.max(0.001, s);
-                    // Fade out opacity faster than the scale shrinks (fades between scale 1.0 and 0.3)
-                    opacity = Math.min(255, Math.max(0, (s - 0.3) / 0.7 * 255));
-                }
-                else {
-                    currentScale = 0.2 + (s * 0.8);
-                    opacity = Math.min(255, Math.max(0, (s / 0.3) * 255));
-                }
-                this.animActor.set_scale(currentScale, currentScale);
-                this.bgActor.opacity = opacity;
-                this.animActor.opacity = opacity;
-                this._syncGeometry();
-                if (stopped) {
-                    this._tickId = 0;
-                    if (isClosing && this.menu.actor) {
-                        this.menu.actor.hide(); // Tell GNOME the menu is officially closed
-                        this.bgActor.opacity = 0;
-                        this.animActor.opacity = 0;
-                    }
-                    if (!isClosing) {
-                        this.animActor.set_scale(1.0, 1.0);
-                        this.animActor.opacity = 255;
-                        this.bgActor.opacity = 255;
-                        this._syncGeometry();
-                    }
-                    return GLib.SOURCE_REMOVE;
-                }
-                return GLib.SOURCE_CONTINUE;
-            });
-        }
-    }
     // ── Submenu position fix (QuickSettings-specific) ──────────────────────────
     // Fix: Force submenu position to the center of the parent menu
     _adjustSubmenuPositions() {
@@ -1175,8 +784,8 @@ export class QuickSettingsManager {
         if (!this._isEffectActive)
             return;
         this._isEffectActive = false;
-        this._stopAdaptiveColorSampling();
-        this._clearAdaptiveStyles();
+        this._adaptiveText?.stop();
+        this._adaptiveText?.clear();
         this._clearButtonStyles();
         this._clearSubmenuFix();
         // Disconnect all event listeners
@@ -1222,23 +831,14 @@ export class QuickSettingsManager {
             if (this.menu.isOpen)
                 this.menu.close(false);
         }
-        // DESTROY EFFECT FIRST (before bgActor.destroy())
-        if (this.effect) {
-            this.effect.cleanup();
-            this.effect = null;
-        }
-        // DESTROY ACTOR HIERARCHY — bgActor.destroy() cascades through
-        // liquidBox → _cloneContainer and all their children.
-        if (this.bgActor) {
-            this.bgActor.destroy();
-            this.bgActor = null;
-        }
+        // Teardown order (effect before actor) is handled by GlassLayer.
+        this.layer?.destroy();
+        this.layer = null;
+        this.effect = null;
+        this.bgActor = null;
         this.liquidBox = null;
         this._cloneContainer = null;
-        // Clean up managers (their destroy() guards against already-destroyed actors)
-        this._uiSampler?.destroy();
         this._uiSampler = null;
-        this._windowCloneManager?.destroy();
         this._windowCloneManager = null;
         this._stableBaseW = undefined;
         this._stableBaseH = undefined;
@@ -1257,43 +857,25 @@ export class QuickSettingsManager {
             return;
         this._removeEffect();
     }
-}
-// A straightforward mathematical implementation of Hooke's Law for spring physics
-class Spring {
-    stiffness;
-    damping;
-    mass;
-    value;
-    velocity;
-    target;
-    constructor(stiffness, damping, mass) {
-        this.stiffness = stiffness; // How rigid the spring is (higher = faster, more snappy)
-        this.damping = damping; // Friction (higher = less bounce, settles quicker)
-        this.mass = mass; // Weight of the object
-        this.value = 0; // Current position/scale
-        this.velocity = 0; // Current speed
-        this.target = 0; // Destination value
+    /**
+     * Quick Settings draws its own tinted tiles and sliders, so text on those is
+     * measured against the tile rather than the glass behind the popup.
+     */
+    _buildAdaptiveGroups() {
+        const root = this.menu?.actor;
+        if (!root || !root.mapped)
+            return [];
+        return groupByCard(root, QS_CARD_CLASSES, root);
     }
-    updateParams(stiffness, damping, mass) {
-        this.stiffness = stiffness; // How rigid the spring is (higher = faster, more snappy)
-        this.damping = damping; // Friction (higher = less bounce, settles quicker)
-        this.mass = mass; // Weight of the object
-    }
-    update(elapsedMs) {
-        // Cap max delta time to prevent the spring from violently exploding during heavy CPU load
-        let dt = elapsedMs / 1000;
-        if (dt > 0.033)
-            dt = 0.033;
-        // F = -k * x
-        let springForce = -this.stiffness * (this.value - this.target);
-        // F = -c * v
-        let dampingForce = -this.damping * this.velocity;
-        // a = F / m
-        let acceleration = (springForce + dampingForce) / this.mass;
-        // Update velocity and position using Euler integration
-        this.velocity += acceleration * dt;
-        this.value += this.velocity * dt;
-        // Return true if the spring has virtually stopped moving and reached its destination
-        return Math.abs(this.velocity) < 0.01 && Math.abs(this.value - this.target) < 0.001;
+    _createAdaptiveText() {
+        this._adaptiveText?.destroy();
+        this._adaptiveText = new AdaptiveTextController({
+            settings: this._settings,
+            logger: this._logger,
+            enabledKey: 'popup-enable-adaptive-text-color',
+            intervalKey: 'popup-sample-interval-ms',
+            collectGroups: () => this._buildAdaptiveGroups(),
+            shouldSample: () => !!this.menu?.isOpen,
+        });
     }
 }

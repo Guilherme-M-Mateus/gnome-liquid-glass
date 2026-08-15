@@ -27,6 +27,47 @@
 }
 
 
+/* =========================================
+   Top panel
+   ========================================= */
+
+/* The base .liquid-glass-transparent rule already wins over the stock
+   #panel { background-color: ... } thanks to !important, but plenty of user
+   themes write #panel { ... !important } too — an id selector (1-0-0) that
+   would otherwise beat our class (0-1-0). Repeating the rule id-qualified
+   raises our specificity to 1-1-0 so the panel stays transparent either way.
+   :overview is included because GNOME adds that pseudo-class in the Overview. */
+#panel.liquid-glass-transparent,
+#panel.liquid-glass-transparent:overview {
+    background-color: transparent !important;
+    background-image: none !important;
+    background-gradient-start: transparent !important;
+    background-gradient-end: transparent !important;
+    border: none !important;
+    border-image: none !important;
+    box-shadow: none !important;
+}
+
+/* Panel buttons draw their hover/active states as a white inset box-shadow
+   (rgba(255,255,255,0.17 / 0.28) in the stock theme). Over glass that reads as
+   a hazy white wash, and it is invisible against a light background once
+   adaptive text has flipped the labels dark. These are dimmer and neutral. */
+#panel.liquid-glass-transparent .panel-button:focus,
+#panel.liquid-glass-transparent .panel-button:hover {
+    box-shadow: inset 0 0 0 100px rgba(127, 127, 127, 0.20) !important;
+}
+
+#panel.liquid-glass-transparent .panel-button:active,
+#panel.liquid-glass-transparent .panel-button:checked {
+    box-shadow: inset 0 0 0 100px rgba(127, 127, 127, 0.34) !important;
+}
+
+#panel.liquid-glass-transparent .panel-button:active:hover,
+#panel.liquid-glass-transparent .panel-button:checked:hover {
+    box-shadow: inset 0 0 0 100px rgba(127, 127, 127, 0.40) !important;
+}
+
+
 /* Force transparency on the notification banner */
 .liquid-glass-transparent.notification-banner {
     background-color: transparent !important;
@@ -120,9 +161,24 @@
     margin-bottom: 6px !important;
 }
 
-.liquid-glass-menu-root .message { background-color: rgba(51, 51, 51, 0.8) !important;
+.liquid-glass-menu-root .message { background-color: rgba(51, 51, 51, 0.95) !important;
     border-radius: 24px !important;
     margin-bottom: 6px !important;
+}
+
+/* GNOME stacks grouped notifications, drawing the older cards behind the front
+   one and relying on the front card being fully opaque to hide them
+   (.message:second-in-stack / :lower-in-stack in the shell theme). A
+   translucent front card lets those hidden cards read straight through, which
+   looks like one notification printed on top of another. Keep the cards behind
+   opaque so only the front one is legible — and note the front card sits on the
+   glass regardless, so it loses nothing visually by being near-opaque. */
+.liquid-glass-menu-root .message:second-in-stack {
+    background-color: rgba(40, 40, 44, 0.98) !important;
+}
+
+.liquid-glass-menu-root .message:lower-in-stack {
+    background-color: rgb(32, 32, 36) !important;
 }
 
 /* ホバー・フォーカス時：白みを増す（明るくする） */

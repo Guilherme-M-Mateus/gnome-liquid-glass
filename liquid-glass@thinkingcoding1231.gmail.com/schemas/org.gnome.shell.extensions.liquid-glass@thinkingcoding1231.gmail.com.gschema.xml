@@ -47,33 +47,54 @@
       <summary>Corner radius</summary>
     </key>
 
-    <key name="enable-menu-glass" type="b">
-      <default>true</default>
-      <summary>Enable glass effect for Menus</summary>
+    <!-- Shared by every popup surface: the date menu, Quick Settings,
+         notifications and OSDs. They used to carry four near-identical copies
+         of these. Anything genuinely per-surface (the enable toggles, the
+         positional offsets) stays separate below. -->
+    <key name="popup-tint-color" type="s">
+      <default>"#ffffff"</default>
+      <summary>Tint color (Hex)</summary>
     </key>
-    <key name="menu-glass-expand" type="i">
+    <key name="popup-tint-strength" type="d">
+      <default>0.12</default>
+      <summary>Tint strength</summary>
+    </key>
+    <key name="popup-blur-radius" type="i">
+      <default>8</default>
+      <summary>Blur radius</summary>
+    </key>
+    <key name="popup-corner-radius" type="d">
+      <default>30.0</default>
+      <summary>Corner radius</summary>
+    </key>
+    <key name="popup-glass-expand" type="i">
       <default>12</default>
       <summary>Glass expand pixels</summary>
     </key>
-    <key name="enable-menu-animation" type="b">
-      <default>true</default>
-      <summary>Enable menu animation</summary>
-    </key>
-    <key name="menu-spring-stiffness" type="d">
-      <default>120.0</default>
-      <summary>Spring stiffness</summary>
-    </key>
-    <key name="menu-spring-damping" type="d">
-      <default>8.0</default>
-      <summary>Spring damping</summary>
-    </key>
-    <key name="menu-spring-mass" type="d">
+    <key name="popup-brightness" type="d">
       <default>1.0</default>
-      <summary>Spring mass</summary>
+      <summary>Brightness</summary>
     </key>
-    <key name="menu-animation-interval-ms" type="i">
-      <default>16</default>
-      <summary>Animation interval (ms)</summary>
+    <key name="popup-contrast" type="d">
+      <default>1.0</default>
+      <summary>Contrast</summary>
+    </key>
+    <key name="popup-saturation" type="d">
+      <default>1.0</default>
+      <summary>Saturation</summary>
+    </key>
+    <key name="popup-enable-adaptive-text-color" type="b">
+      <default>true</default>
+      <summary>Enable adaptive text color</summary>
+    </key>
+    <key name="popup-sample-interval-ms" type="i">
+      <default>400</default>
+      <summary>Sample interval (ms)</summary>
+    </key>
+
+    <key name="enable-menu-glass" type="b">
+      <default>true</default>
+      <summary>Enable glass effect for Menus</summary>
     </key>
     <key name="menu-x-offset" type="i">
       <default>0</default>
@@ -82,165 +103,23 @@
     <key name="menu-y-offset" type="i">
       <default>17</default> <summary>Y offset</summary>
     </key>
-    <key name="menu-enable-adaptive-text-color" type="b">
-      <default>true</default>
-      <summary>Enable adaptive text color</summary>
-    </key>
-    <key name="menu-sample-per-element" type="b">
-      <default>false</default>
-      <summary>Sample per element</summary>
-    </key>
-    <key name="menu-sample-interval-ms" type="i">
-      <default>400</default>
-      <summary>Sample interval (ms)</summary>
-    </key>
-    <key name="menu-tint-color" type="s">
-      <default>"#ffffff"</default>
-      <summary>Tint color (Hex)</summary>
-    </key>
-    <key name="menu-tint-strength" type="d">
-      <default>0.20</default>
-      <summary>Tint strength</summary>
-    </key>
-    <key name="menu-blur-radius" type="i">
-      <default>8</default>
-      <summary>Blur radius</summary>
-    </key>
-    <key name="menu-corner-radius" type="d">
-      <default>60.0</default>
-      <summary>Corner radius</summary>
-    </key>
-    <key name="menu-brightness" type="d">
-      <default>1.0</default>
-      <summary>Brightness</summary>
-      <description>Adjusts the overall brightness of the menu.</description>
-    </key>
-    <key name="menu-contrast" type="d">
-      <default>1.0</default>
-      <summary>Contrast</summary>
-      <description>Adjusts the contrast of the menu.</description>
-    </key>
-    <key name="menu-saturation" type="d">
-      <default>1.0</default>
-      <summary>Saturation</summary>
-      <description>Adjusts the saturation of the menu.</description>
-    </key>
 
     <key name="enable-notification-glass" type="b">
       <default>true</default>
       <summary>Enable glass effect for Notifications</summary>
     </key>
-    <key name="notification-enable-adaptive-text-color" type="b">
-      <default>true</default>
-      <summary>Enable adaptive text color</summary>
-    </key>
-    <key name="notification-sample-per-element" type="b">
-      <default>false</default>
-      <summary>Sample per element</summary>
-    </key>
-    <key name="notification-sample-interval-ms" type="i">
-      <default>400</default>
-      <summary>Sample interval (ms)</summary>
-    </key>
     <key name="notification-hide-safety-margin" type="i">
       <default>7</default>
       <summary>Hide safety margin</summary>
-    </key>
-    <key name="notification-tint-color" type="s">
-      <default>"#ffffff"</default>
-      <summary>Tint color (Hex)</summary>
-    </key>
-    <key name="notification-tint-strength" type="d">
-      <default>0.08</default>
-      <summary>Tint strength</summary>
-    </key>
-    <key name="notification-blur-radius" type="i">
-      <default>10</default>
-      <summary>Blur radius</summary>
-    </key>
-    <key name="notification-corner-radius" type="d">
-      <default>30.0</default>
-      <summary>Corner radius</summary>
-    </key>
-    <key name="notification-glass-expand" type="i">
-      <default>12</default>
-      <summary>Glass expand pixels</summary>
     </key>
     <key name="notification-y-offset" type="i">
       <default>10</default>
       <summary>Y offset</summary>
     </key>
-    <key name="notification-brightness" type="d">
-      <default>1.0</default>
-      <summary>Brightness</summary>
-      <description>Adjusts the overall brightness of the notifications.</description>
-    </key>
-    <key name="notification-contrast" type="d">
-      <default>1.0</default>
-      <summary>Contrast</summary>
-      <description>Adjusts the contrast of the notifications.</description>
-    </key>
-    <key name="notification-saturation" type="d">
-      <default>1.0</default>
-      <summary>Saturation</summary>
-      <description>Adjusts the saturation of the notifications.</description>
-    </key>
 
     <key name="enable-quick-settings-glass" type="b">
       <default>true</default>
       <summary>Enable glass effect for Quick Settings</summary>
-    </key>
-    <key name="enable-quick-settings-animation" type="b">
-      <default>true</default>
-      <summary>Enable quick settings animation</summary>
-    </key>
-    <key name="quick-settings-spring-stiffness" type="d">
-      <default>120.0</default>
-      <summary>Spring stiffness</summary>
-    </key>
-    <key name="quick-settings-spring-damping" type="d">
-      <default>8.0</default>
-      <summary>Spring damping</summary>
-    </key>
-    <key name="quick-settings-spring-mass" type="d">
-      <default>1.0</default>
-      <summary>Spring mass</summary>
-    </key>
-    <key name="quick-settings-animation-interval-ms" type="i">
-      <default>16</default>
-      <summary>Animation interval (ms)</summary>
-    </key>
-    <key name="quick-settings-enable-adaptive-text-color" type="b">
-      <default>false</default>
-      <summary>Enable adaptive text color</summary>
-    </key>
-    <key name="quick-settings-sample-per-element" type="b">
-      <default>false</default>
-      <summary>Sample per element</summary>
-    </key>
-    <key name="quick-settings-sample-interval-ms" type="i">
-      <default>400</default>
-      <summary>Sample interval (ms)</summary>
-    </key>
-    <key name="quick-settings-tint-color" type="s">
-      <default>"#ffffff"</default>
-      <summary>Tint color (Hex)</summary>
-    </key>
-    <key name="quick-settings-tint-strength" type="d">
-      <default>0.12</default>
-      <summary>Tint strength</summary>
-    </key>
-    <key name="quick-settings-blur-radius" type="i">
-      <default>5</default>
-      <summary>Blur radius</summary>
-    </key>
-    <key name="quick-settings-corner-radius" type="d">
-      <default>30.0</default>
-      <summary>Corner radius</summary>
-    </key>
-    <key name="quick-settings-glass-expand" type="i">
-      <default>12</default>
-      <summary>Glass expand pixels</summary>
     </key>
     <key name="quick-settings-y-offset" type="i">
       <default>17</default>
@@ -250,72 +129,90 @@
       <default>0</default>
       <summary>X offset</summary>
     </key>
-    <key name="quick-settings-brightness" type="d">
-      <default>1.0</default>
-      <summary>Brightness</summary>
-      <description>Adjusts the overall brightness of the quick settings.</description>
-    </key>
-    <key name="quick-settings-contrast" type="d">
-      <default>1.0</default>
-      <summary>Contrast</summary>
-      <description>Adjusts the contrast of the quick settings.</description>
-    </key>
-    <key name="quick-settings-saturation" type="d">
-      <default>1.0</default>
-      <summary>Saturation</summary>
-      <description>Adjusts the saturation of the quick settings.</description>
-    </key>
 
     <key name="enable-osd-glass" type="b">
       <default>true</default>
       <summary>Enable glass effect for OSD</summary>
     </key>
-    <key name="osd-enable-adaptive-text-color" type="b">
-      <default>true</default>
-      <summary>Enable adaptive text color</summary>
-    </key>
-    <key name="osd-sample-interval-ms" type="i">
-      <default>400</default>
-      <summary>Sample interval (ms)</summary>
-    </key>
-    <key name="osd-tint-color" type="s">
-      <default>"#ffffff"</default>
-      <summary>Tint color (Hex)</summary>
-    </key>
-    <key name="osd-tint-strength" type="d">
-      <default>0.12</default>
-      <summary>Tint strength</summary>
-    </key>
-    <key name="osd-blur-radius" type="i">
-      <default>5</default>
-      <summary>Blur radius</summary>
-    </key>
-    <key name="osd-corner-radius" type="d">
-      <default>30.0</default>
-      <summary>Corner radius</summary>
-    </key>
-    <key name="osd-glass-expand" type="i">
-      <default>12</default>
-      <summary>Glass expand pixels</summary>
-    </key>
     <key name="osd-y-offset" type="i">
       <default>17</default>
       <summary>Y offset</summary>
     </key>
-    <key name="osd-brightness" type="d">
+
+    <key name="enable-panel-glass" type="b">
+      <default>true</default>
+      <summary>Enable glass effect for the Top Panel</summary>
+      <description>Whether to apply the liquid glass effect to the GNOME top panel bar.</description>
+    </key>
+    <key name="panel-floating" type="b">
+      <default>true</default>
+      <summary>Floating panel</summary>
+      <description>Draw the panel as a floating rounded pill with margins. When off, the panel stays edge-to-edge and only its bottom corners are rounded.</description>
+    </key>
+    <key name="panel-side-margin" type="i">
+      <default>8</default>
+      <summary>Side margin</summary>
+      <description>Left/right inset of the floating panel. Ignored when the panel is not floating.</description>
+    </key>
+    <key name="panel-top-margin" type="i">
+      <default>4</default>
+      <summary>Top margin</summary>
+      <description>Top inset of the floating panel. Ignored when the panel is not floating.</description>
+    </key>
+    <key name="panel-transparent" type="b">
+      <default>false</default>
+      <summary>Fully transparent panel</summary>
+      <description>Drop the panel background entirely and draw no glass, leaving only the clock, icons and buttons over the desktop. Adaptive text colouring still runs so the content stays readable.</description>
+    </key>
+    <key name="panel-height" type="i">
+      <range min="0" max="120"/>
+      <default>0</default>
+      <summary>Panel height (px)</summary>
+      <description>Overrides the theme's top panel height. 0 keeps the theme default. A taller panel gives the glass more room, so the refraction and edge lighting read more strongly.</description>
+    </key>
+    <key name="panel-glass-expand" type="i">
+      <default>0</default>
+      <summary>Glass expand pixels</summary>
+    </key>
+    <key name="panel-tint-color" type="s">
+      <default>"#ffffff"</default>
+      <summary>Tint color (Hex)</summary>
+    </key>
+    <key name="panel-tint-strength" type="d">
+      <default>0.12</default>
+      <summary>Tint strength</summary>
+    </key>
+    <key name="panel-blur-radius" type="i">
+      <default>5</default>
+      <summary>Blur radius</summary>
+    </key>
+    <key name="panel-corner-radius" type="d">
+      <default>30.0</default>
+      <summary>Corner radius</summary>
+    </key>
+    <key name="panel-enable-adaptive-text-color" type="b">
+      <default>true</default>
+      <summary>Enable adaptive text color</summary>
+    </key>
+    <key name="panel-sample-interval-ms" type="i">
+      <default>1000</default>
+      <summary>Sample interval (ms)</summary>
+      <description>Contrast sampling frequency. Higher than other surfaces because the panel is permanently on screen.</description>
+    </key>
+    <key name="panel-brightness" type="d">
       <default>1.0</default>
       <summary>Brightness</summary>
-      <description>Adjusts the overall brightness of the on-screen displays.</description>
+      <description>Adjusts the overall brightness of the top panel.</description>
     </key>
-    <key name="osd-contrast" type="d">
+    <key name="panel-contrast" type="d">
       <default>1.0</default>
       <summary>Contrast</summary>
-      <description>Adjusts the contrast of the on-screen displays.</description>
+      <description>Adjusts the contrast of the top panel.</description>
     </key>
-    <key name="osd-saturation" type="d">
+    <key name="panel-saturation" type="d">
       <default>1.0</default>
       <summary>Saturation</summary>
-      <description>Adjusts the saturation of the on-screen displays.</description>
+      <description>Adjusts the saturation of the top panel.</description>
     </key>
 
     <key name="blur-method" type="i">

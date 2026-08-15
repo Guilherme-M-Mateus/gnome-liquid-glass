@@ -3,6 +3,10 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import Gdk from 'gi://Gdk';
+import GLib from 'gi://GLib';
+
+const SCHEMA_ID = 'org.gnome.shell.extensions.liquid-glass@thinkingcoding1231.gmail.com';
+const BACKUP_VERSION = 1;
 
 export default class LiquidGlassPreferences extends ExtensionPreferences {
   fillPreferencesWindow(window) {
@@ -16,6 +20,88 @@ export default class LiquidGlassPreferences extends ExtensionPreferences {
     resource._register();
     const iconTheme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default());
     iconTheme.add_resource_path('/com/example/my-app/icons');
+
+    // --- General タブ ---
+    // Landing page: the master toggles for every surface in one place, plus
+    // settings backup/restore.
+    const generalPage = new Adw.PreferencesPage({
+      title: 'General',
+      icon_name: 'preferences-system-symbolic',
+    });
+    window.add(generalPage);
+
+    const surfacesGroup = new Adw.PreferencesGroup({
+      title: 'Surfaces',
+      description: 'Which parts of the shell get the liquid glass effect. These mirror the toggles on each page.',
+    });
+    generalPage.add(surfacesGroup);
+
+    this._addSwitchRow(surfacesGroup, settings, 'enable-panel-glass', 'Top Panel', 'The top panel bar');
+    this._addSwitchRow(surfacesGroup, settings, 'enable-dock-glass', 'Dock', 'Dash to Dock');
+    this._addSwitchRow(surfacesGroup, settings, 'enable-menu-glass', 'Menus', 'Panel menus and popups');
+    this._addSwitchRow(surfacesGroup, settings, 'enable-notification-glass', 'Notifications', 'Notification banners');
+    this._addSwitchRow(surfacesGroup, settings, 'enable-quick-settings-glass', 'Quick Settings', 'The quick settings panel');
+    this._addSwitchRow(surfacesGroup, settings, 'enable-osd-glass', 'OSD', 'Volume and brightness popups');
+
+    const backupGroup = new Adw.PreferencesGroup({
+      title: 'Backup & Restore',
+      description: 'Save your tuned configuration to a file, restore it, or start over.',
+    });
+    generalPage.add(backupGroup);
+
+    this._addButtonRow(backupGroup, 'Export Settings', 'Save all settings to a JSON file',
+      'Export…', false, () => this._exportSettings(settings, window));
+    this._addButtonRow(backupGroup, 'Import Settings', 'Load settings from a previously exported file',
+      'Import…', false, () => this._importSettings(settings, window));
+    this._addButtonRow(backupGroup, 'Reset All to Defaults', 'Discard every customisation and return to the shipped defaults',
+      'Reset…', true, () => this._confirmResetSettings(settings, window));
+
+    // --- Top Panel タブ ---
+    const panelPage = new Adw.PreferencesPage({
+      title: 'Top Panel',
+      icon_name: 'focus-top-bar-symbolic',
+    });
+    window.add(panelPage);
+
+    const panelGroup = new Adw.PreferencesGroup({
+      title: 'Top Panel Settings',
+      description: 'Configure the liquid glass effect for the GNOME top panel bar',
+    });
+    panelPage.add(panelGroup);
+
+    this._addSwitchRow(panelGroup, settings, 'enable-panel-glass', 'Enable Glass Effect', 'Apply the effect to the top panel');
+
+    this._addSwitchRow(panelGroup, settings, 'panel-transparent', 'Fully Transparent', 'Draw no glass at all — just the clock, icons and buttons over your wallpaper. Adaptive text colour still runs so they stay readable.');
+
+    this._addSwitchRow(panelGroup, settings, 'panel-floating', 'Floating Panel', 'Inset the panel and draw it as a rounded pill. When off, the panel stays edge-to-edge and only its bottom corners are rounded.');
+    const panelSideMarginRow = this._addSliderRow(panelGroup, settings, 'panel-side-margin', 'Side Margin', 'Left/right inset of the floating panel', 0, 100, 1);
+    const panelTopMarginRow = this._addSliderRow(panelGroup, settings, 'panel-top-margin', 'Top Margin', 'Top inset of the floating panel', 0, 50, 1);
+    // Margins only mean anything while the panel is floating.
+    settings.bind('panel-floating', panelSideMarginRow, 'visible', Gio.SettingsBindFlags.GET);
+    settings.bind('panel-floating', panelTopMarginRow, 'visible', Gio.SettingsBindFlags.GET);
+
+    this._addSliderRow(panelGroup, settings, 'panel-height', 'Panel Height', 'Overrides the theme height. 0 = theme default. A taller panel gives the glass more room to read.', 0, 120, 1);
+    this._addSliderRow(panelGroup, settings, 'panel-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
+
+    this._addSwitchRow(panelGroup, settings, 'panel-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
+    const panelSampleIntervalRow = this._addSliderRow(panelGroup, settings, 'panel-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency. The panel is always on screen, so keep this higher than for other surfaces.', 200, 5000, 50);
+    settings.bind('panel-enable-adaptive-text-color', panelSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
+
+    this._addColorRow(panelGroup, settings, 'panel-tint-color', 'Tint Color', 'Color of the glass tint');
+    this._addSliderRow(panelGroup, settings, 'panel-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
+    const panelBlurRow = this._addSliderRow(panelGroup, settings, 'panel-blur-radius', 'Blur Radius', '', 0, 30, 1);
+    blurRadiusRows.push(panelBlurRow);
+    this._addSliderRow(panelGroup, settings, 'panel-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
+
+    const panelAdvanced = new Adw.ExpanderRow({
+      title: 'Advanced',
+      subtitle: 'Color adjustments (Brightness, Contrast, Saturation)'
+    });
+    panelGroup.add(panelAdvanced);
+
+    this._addSliderRow(panelAdvanced, settings, 'panel-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
+    this._addSliderRow(panelAdvanced, settings, 'panel-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
+    this._addSliderRow(panelAdvanced, settings, 'panel-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
 
     // --- Dock タブ ---
     const dockPage = new Adw.PreferencesPage({
@@ -52,183 +138,64 @@ export default class LiquidGlassPreferences extends ExtensionPreferences {
     this._addSliderRow(dockAdvanced, settings, 'dock-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
     this._addSliderRow(dockAdvanced, settings, 'dock-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
 
-
-    // --- Menu タブ ---
-    const menuPage = new Adw.PreferencesPage({
-      title: 'Menu',
+    // --- Popups タブ ---
+    // One page for every popup surface. These used to be four pages carrying
+    // four near-identical copies of the same settings; the shared popup-*
+    // keys mean tuning the glass once applies to all of them.
+    const popupPage = new Adw.PreferencesPage({
+      title: 'Popups',
       icon_name: 'view-list-symbolic',
     });
-    window.add(menuPage);
+    window.add(popupPage);
 
-    const menuGroup = new Adw.PreferencesGroup({ title: 'Menu Settings' });
-    menuPage.add(menuGroup);
-
-    this._addSwitchRow(menuGroup, settings, 'enable-menu-glass', 'Enable Glass Effect', 'Apply to menus and popups');
-    this._addSwitchRow(menuGroup, settings, "enable-menu-animation", "Enable Menu Animation", "Animate menu transitions using spring physics");
-
-    this._addSliderRow(menuGroup, settings, 'menu-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
-    this._addSliderRow(menuGroup, settings, 'menu-x-offset', 'X Offset', 'Horizontal offset adjustment', -200, 200, 1);
-    this._addSliderRow(menuGroup, settings, 'menu-y-offset', 'Y Offset', 'Vertical offset adjustment', -50, 100, 1);
-
-    this._addSwitchRow(menuGroup, settings, 'menu-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
-    const menuSampleIntervalRow = this._addSliderRow(menuGroup, settings, 'menu-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency', 100, 2000, 50);
-    // Adaptive Text Color連動の非表示化
-    settings.bind('menu-enable-adaptive-text-color', menuSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
-
-    this._addColorRow(menuGroup, settings, 'menu-tint-color', 'Tint Color', 'Color of the glass tint');
-    this._addSliderRow(menuGroup, settings, 'menu-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
-    const menuBlurRow = this._addSliderRow(menuGroup, settings, 'menu-blur-radius', 'Blur Radius', '', 0, 30, 1);
-    blurRadiusRows.push(menuBlurRow);
-    this._addSliderRow(menuGroup, settings, 'menu-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
-
-    // Advancedグループ (開閉可能) - Spring関連とカラー調整をここに集約
-    const menuAdvanced = new Adw.ExpanderRow({
-      title: 'Advanced',
-      subtitle: 'Spring physics, color adjustments (Brightness, Contrast, Saturation)'
+    const popupGroup = new Adw.PreferencesGroup({
+      title: 'Popup Settings',
+      description: 'Shared by the calendar menu, Quick Settings, notifications and OSDs. Turn individual surfaces on or off on the General page.',
     });
-    menuGroup.add(menuAdvanced);
+    popupPage.add(popupGroup);
 
-    // 【修正】Spring物理挙動パラメータをAdvanced内へ移動
-    const menuStiffnessRow = this._addSliderRow(menuAdvanced, settings, 'menu-spring-stiffness', 'Spring Stiffness', 'Spring stiffness', 0.0, 1000.0, 0.1);
-    const menuDampingRow = this._addSliderRow(menuAdvanced, settings, 'menu-spring-damping', 'Spring Damping', 'Spring damping', 0.0, 1000.0, 0.1);
-    const menuMassRow = this._addSliderRow(menuAdvanced, settings, 'menu-spring-mass', 'Spring Mass', 'Spring mass', 0.0, 1.0, 0.1);
-    const menuIntervalRow = this._addSliderRow(menuAdvanced, settings, 'menu-animation-interval-ms', 'Animation Interval (ms)', 'Animation interval', 0, 1000, 1);
+    this._addSliderRow(popupGroup, settings, 'popup-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
 
-    // アニメーションOFF時に項目を非表示にするバインド（Advanced内にあっても正常に動作します）
-    settings.bind('enable-menu-animation', menuStiffnessRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-menu-animation', menuDampingRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-menu-animation', menuMassRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-menu-animation', menuIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
+    this._addSwitchRow(popupGroup, settings, 'popup-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
+    const popupSampleIntervalRow = this._addSliderRow(popupGroup, settings, 'popup-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency', 100, 2000, 50);
+    settings.bind('popup-enable-adaptive-text-color', popupSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
 
-    // カラー調整（Advanced内）
-    this._addSliderRow(menuAdvanced, settings, 'menu-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
-    this._addSliderRow(menuAdvanced, settings, 'menu-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
-    this._addSliderRow(menuAdvanced, settings, 'menu-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
+    this._addColorRow(popupGroup, settings, 'popup-tint-color', 'Tint Color', 'Color of the glass tint');
+    this._addSliderRow(popupGroup, settings, 'popup-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
+    const popupBlurRow = this._addSliderRow(popupGroup, settings, 'popup-blur-radius', 'Blur Radius', '', 0, 30, 1);
+    blurRadiusRows.push(popupBlurRow);
+    this._addSliderRow(popupGroup, settings, 'popup-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
 
-
-    // --- Notifications タブ ---
-    const notifPage = new Adw.PreferencesPage({
-      title: 'Notifications',
-      icon_name: 'preferences-system-notifications-symbolic',
-    });
-    window.add(notifPage);
-
-    const notifGroup = new Adw.PreferencesGroup({ title: 'Notification Settings' });
-    notifPage.add(notifGroup);
-
-    this._addSwitchRow(notifGroup, settings, 'enable-notification-glass', 'Enable Glass Effect', 'Apply to notification banners');
-
-    this._addSwitchRow(notifGroup, settings, 'notification-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
-    const notifSampleIntervalRow = this._addSliderRow(notifGroup, settings, 'notification-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency', 100, 2000, 50);
-    // Adaptive Text Color連動の非表示化
-    settings.bind('notification-enable-adaptive-text-color', notifSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
-
-    this._addSliderRow(notifGroup, settings, 'notification-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
-    this._addSliderRow(notifGroup, settings, 'notification-y-offset', 'Y Offset', 'Vertical offset adjustment', 0, 100, 1);
-    this._addColorRow(notifGroup, settings, 'notification-tint-color', 'Tint Color', 'Color of the glass tint');
-    this._addSliderRow(notifGroup, settings, 'notification-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
-    const notifBlurRow = this._addSliderRow(notifGroup, settings, 'notification-blur-radius', 'Blur Radius', '', 0, 30, 1);
-    blurRadiusRows.push(notifBlurRow);
-    this._addSliderRow(notifGroup, settings, 'notification-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
-
-    // Advancedグループ (開閉可能)
-    const notifAdvanced = new Adw.ExpanderRow({
+    const popupAdvanced = new Adw.ExpanderRow({
       title: 'Advanced',
       subtitle: 'Color adjustments (Brightness, Contrast, Saturation)'
     });
-    notifGroup.add(notifAdvanced);
+    popupGroup.add(popupAdvanced);
 
-    this._addSliderRow(notifAdvanced, settings, 'notification-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
-    this._addSliderRow(notifAdvanced, settings, 'notification-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
-    this._addSliderRow(notifAdvanced, settings, 'notification-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
+    this._addSliderRow(popupAdvanced, settings, 'popup-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
+    this._addSliderRow(popupAdvanced, settings, 'popup-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
+    this._addSliderRow(popupAdvanced, settings, 'popup-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
 
-
-    // --- Quick Settings タブ ---
-    const qsPage = new Adw.PreferencesPage({
-      title: 'Quick Settings',
-      icon_name: 'shapes-large-symbolic',
+    // The few things that genuinely differ per surface.
+    const offsetsGroup = new Adw.PreferencesGroup({
+      title: 'Per-popup Position',
+      description: 'Fine positioning for individual surfaces.',
     });
-    window.add(qsPage);
+    popupPage.add(offsetsGroup);
 
-    const qsGroup = new Adw.PreferencesGroup({ title: 'Quick Settings Settings (Experimental)' });
-    qsPage.add(qsGroup);
-
-    this._addSwitchRow(qsGroup, settings, 'enable-quick-settings-glass', 'Enable Glass Effect', 'Apply to quick settings panel');
-    this._addSwitchRow(qsGroup, settings, "enable-quick-settings-animation", "Enable Quick Settings Animation", "Apply to quick settings panel");
-
-    this._addSwitchRow(qsGroup, settings, 'quick-settings-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
-    const qsSampleIntervalRow = this._addSliderRow(qsGroup, settings, 'quick-settings-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency', 100, 2000, 50);
-    // Adaptive Text Color連動の非表示化
-    settings.bind('quick-settings-enable-adaptive-text-color', qsSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
-
-    this._addSliderRow(qsGroup, settings, 'quick-settings-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
-    this._addSliderRow(qsGroup, settings, 'quick-settings-x-offset', 'X Offset', 'Horizontal offset adjustment', -100, 100, 1);
-    this._addSliderRow(qsGroup, settings, 'quick-settings-y-offset', 'Y Offset', 'Vertical offset adjustment', -100, 100, 1);
-    this._addColorRow(qsGroup, settings, 'quick-settings-tint-color', 'Tint Color', 'Color of the glass tint');
-    this._addSliderRow(qsGroup, settings, 'quick-settings-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
-    const qsBlurRow = this._addSliderRow(qsGroup, settings, 'quick-settings-blur-radius', 'Blur Radius', '', 0, 30, 1);
-    blurRadiusRows.push(qsBlurRow);
-    this._addSliderRow(qsGroup, settings, 'quick-settings-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
-
-    // Advancedグループ (開閉可能) - Spring関連とカラー調整をここに集約
-    const qsAdvanced = new Adw.ExpanderRow({
-      title: 'Advanced',
-      subtitle: 'Spring physics, color adjustments (Brightness, Contrast, Saturation)'
+    const offsets = new Adw.ExpanderRow({
+      title: 'Offsets',
+      subtitle: 'Nudge individual popups into place'
     });
-    qsGroup.add(qsAdvanced);
+    offsetsGroup.add(offsets);
 
-    const quickSettingsStiffnessRow = this._addSliderRow(qsAdvanced, settings, 'quick-settings-spring-stiffness', 'Spring Stiffness', 'Spring stiffness', 0.0, 1000.0, 0.1);
-    const quickSettingsDampingRow = this._addSliderRow(qsAdvanced, settings, 'quick-settings-spring-damping', 'Spring Damping', 'Spring damping', 0.0, 1000.0, 0.1);
-    const quickSettingsMassRow = this._addSliderRow(qsAdvanced, settings, 'quick-settings-spring-mass', 'Spring Mass', 'Spring mass', 0.0, 1.0, 0.1);
-    const quickSettingsIntervalRow = this._addSliderRow(qsAdvanced, settings, 'quick-settings-animation-interval-ms', 'Animation Interval (ms)', 'Animation interval', 0, 1000, 1);
-
-    // アニメーションOFF時に項目を非表示にするバインド
-    settings.bind('enable-quick-settings-animation', quickSettingsStiffnessRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-quick-settings-animation', quickSettingsDampingRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-quick-settings-animation', quickSettingsMassRow, 'visible', Gio.SettingsBindFlags.GET);
-    settings.bind('enable-quick-settings-animation', quickSettingsIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
-
-    // カラー調整（Advanced内）
-    this._addSliderRow(qsAdvanced, settings, 'quick-settings-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
-    this._addSliderRow(qsAdvanced, settings, 'quick-settings-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
-    this._addSliderRow(qsAdvanced, settings, 'quick-settings-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
-
-
-    // --- OSD タブ ---
-    const osdPage = new Adw.PreferencesPage({
-      title: 'OSD',
-      icon_name: 'audio-volume-medium-symbolic',
-    });
-    window.add(osdPage);
-
-    const osdGroup = new Adw.PreferencesGroup({ title: 'OSD Settings (Experimental)' });
-    osdPage.add(osdGroup);
-
-    this._addSwitchRow(osdGroup, settings, 'enable-osd-glass', 'Enable Glass Effect', 'Apply to on-screen displays (like volume changes)');
-
-    this._addSwitchRow(osdGroup, settings, 'osd-enable-adaptive-text-color', 'Adaptive Text Color', 'Adjust text contrast automatically');
-    const osdSampleIntervalRow = this._addSliderRow(osdGroup, settings, 'osd-sample-interval-ms', 'Sample Interval (ms)', 'Contrast update frequency', 100, 2000, 50);
-    // Adaptive Text Color連動の非表示化
-    settings.bind('osd-enable-adaptive-text-color', osdSampleIntervalRow, 'visible', Gio.SettingsBindFlags.GET);
-
-    this._addSliderRow(osdGroup, settings, 'osd-glass-expand', 'Glass Expand', 'Extra area for the effect', 0, 50, 1);
-    this._addSliderRow(osdGroup, settings, 'osd-y-offset', 'Y Offset', 'Vertical offset adjustment', -100, 100, 1);
-    this._addColorRow(osdGroup, settings, 'osd-tint-color', 'Tint Color', 'Color of the glass tint');
-    this._addSliderRow(osdGroup, settings, 'osd-tint-strength', 'Tint Strength', 'Intensity of the color tint', 0.0, 1.0, 0.01);
-    const osdBlurRow = this._addSliderRow(osdGroup, settings, 'osd-blur-radius', 'Blur Radius', '', 0, 30, 1);
-    blurRadiusRows.push(osdBlurRow);
-    this._addSliderRow(osdGroup, settings, 'osd-corner-radius', 'Corner Radius', 'Roundness of the corners', 0, 200, 1);
-
-    // Advancedグループ (開閉可能)
-    const osdAdvanced = new Adw.ExpanderRow({
-      title: 'Advanced',
-      subtitle: 'Color adjustments (Brightness, Contrast, Saturation)'
-    });
-    osdGroup.add(osdAdvanced);
-
-    this._addSliderRow(osdAdvanced, settings, 'osd-brightness', 'Brightness', 'Adjusts brightness', 0.5, 1.5, 0.01);
-    this._addSliderRow(osdAdvanced, settings, 'osd-contrast', 'Contrast', 'Adjusts contrast', 0.5, 1.5, 0.01);
-    this._addSliderRow(osdAdvanced, settings, 'osd-saturation', 'Saturation', 'Adjusts saturation', 0.0, 2.0, 0.01);
+    this._addSliderRow(offsets, settings, 'menu-x-offset', 'Calendar Menu — X Offset', '', -200, 200, 1);
+    this._addSliderRow(offsets, settings, 'menu-y-offset', 'Calendar Menu — Y Offset', '', -50, 100, 1);
+    this._addSliderRow(offsets, settings, 'quick-settings-x-offset', 'Quick Settings — X Offset', '', -200, 200, 1);
+    this._addSliderRow(offsets, settings, 'quick-settings-y-offset', 'Quick Settings — Y Offset', '', -50, 100, 1);
+    this._addSliderRow(offsets, settings, 'notification-y-offset', 'Notifications — Y Offset', '', -50, 100, 1);
+    this._addSliderRow(offsets, settings, 'osd-y-offset', 'OSD — Y Offset', '', -50, 100, 1);
+    this._addSliderRow(offsets, settings, 'notification-hide-safety-margin', 'Notifications — Hide Safety Margin', '', 0, 40, 1);
 
 
     // --- Glass Properties タブ ---
@@ -312,6 +279,172 @@ export default class LiquidGlassPreferences extends ExtensionPreferences {
     // 設定変更時のシグナル接続と、初期起動時の実行
     settings.connect('changed::blur-method', updateBlurSubtitles);
     updateBlurSubtitles();
+  }
+
+  // --- Backup & Restore ---
+
+  // ボタン付きの行（Export / Import / Reset 用）
+  _addButtonRow(container, title, subtitle, buttonLabel, destructive, onClicked) {
+    const row = new Adw.ActionRow({ title, subtitle });
+    const button = new Gtk.Button({
+      label: buttonLabel,
+      valign: Gtk.Align.CENTER,
+    });
+    if (destructive) button.add_css_class('destructive-action');
+    button.connect('clicked', onClicked);
+    row.add_suffix(button);
+    row.activatable_widget = button;
+    this._addRowToContainer(container, row);
+    return row;
+  }
+
+  _toast(window, message) {
+    // Adw.PreferencesWindow/Dialog both expose add_toast in the versions we
+    // target, but fall back to a log line rather than throwing if it is absent.
+    try {
+      if (typeof window.add_toast === 'function') {
+        window.add_toast(new Adw.Toast({ title: message, timeout: 3 }));
+        return;
+      }
+    } catch (e) { }
+    console.log(`[Liquid Glass] ${message}`);
+  }
+
+  /**
+   * Serialises every key in the schema as its GVariant text form, which
+   * round-trips exactly and keeps the type legible in the saved file.
+   */
+  _exportSettings(settings, window) {
+    const dialog = new Gtk.FileDialog({
+      title: 'Export Liquid Glass Settings',
+      initial_name: 'liquid-glass-settings.json',
+      modal: true,
+    });
+
+    dialog.save(window, null, (source, result) => {
+      let file;
+      try {
+        file = source.save_finish(result);
+      } catch (e) {
+        // The user dismissed the dialog — not an error worth reporting.
+        return;
+      }
+      if (!file) return;
+
+      try {
+        const payload = {
+          schema: SCHEMA_ID,
+          version: BACKUP_VERSION,
+          keys: {},
+        };
+        for (const key of settings.settings_schema.list_keys())
+          payload.keys[key] = settings.get_value(key).print(true);
+
+        const text = JSON.stringify(payload, null, 2);
+        file.replace_contents(
+          new TextEncoder().encode(text), null, false,
+          Gio.FileCreateFlags.REPLACE_DESTINATION, null
+        );
+        this._toast(window, `Exported ${Object.keys(payload.keys).length} settings`);
+      } catch (e) {
+        this._toast(window, `Export failed: ${e.message ?? e}`);
+      }
+    });
+  }
+
+  _importSettings(settings, window) {
+    const dialog = new Gtk.FileDialog({
+      title: 'Import Liquid Glass Settings',
+      modal: true,
+    });
+
+    dialog.open(window, null, (source, result) => {
+      let file;
+      try {
+        file = source.open_finish(result);
+      } catch (e) {
+        return; // dismissed
+      }
+      if (!file) return;
+
+      try {
+        const [ok, bytes] = file.load_contents(null);
+        if (!ok) throw new Error('could not read the file');
+
+        const payload = JSON.parse(new TextDecoder().decode(bytes));
+        if (!payload || typeof payload !== 'object' || !payload.keys)
+          throw new Error('not a Liquid Glass settings file');
+        if (payload.schema && payload.schema !== SCHEMA_ID)
+          throw new Error('this file belongs to a different extension');
+
+        const schema = settings.settings_schema;
+        let applied = 0;
+        let skipped = 0;
+
+        // Batch the whole import into a single changeset. Without this, each
+        // key fires its own changed:: signal and the running shell rebuilds
+        // shader state ~80 times in a row.
+        //
+        // delay() is used on a throwaway Gio.Settings rather than the one the
+        // widgets are bound to: there is no API to leave delay-apply mode, so
+        // delaying the shared instance would silently swallow every later edit
+        // the user makes in this window.
+        const writer = this.getSettings(SCHEMA_ID);
+        writer.delay();
+        try {
+          for (const [key, text] of Object.entries(payload.keys)) {
+            if (!schema.has_key(key)) { skipped++; continue; }
+            try {
+              // Parse against the live schema's type, so a corrupt or
+              // hand-edited file cannot write the wrong type into a key.
+              const expectedType = settings.get_value(key).get_type();
+              const variant = GLib.Variant.parse(expectedType, text, null, null);
+              writer.set_value(key, variant);
+              applied++;
+            } catch (e) {
+              skipped++;
+            }
+          }
+          writer.apply();
+        } catch (e) {
+          writer.revert();
+          throw e;
+        }
+
+        const detail = skipped > 0 ? `, ${skipped} skipped` : '';
+        this._toast(window, `Imported ${applied} settings${detail}`);
+      } catch (e) {
+        this._toast(window, `Import failed: ${e.message ?? e}`);
+      }
+    });
+  }
+
+  _confirmResetSettings(settings, window) {
+    const dialog = new Adw.AlertDialog({
+      heading: 'Reset all settings?',
+      body: 'Every Liquid Glass customisation returns to its default value. This cannot be undone — export a backup first if you want to keep the current look.',
+    });
+    dialog.add_response('cancel', 'Cancel');
+    dialog.add_response('reset', 'Reset');
+    dialog.set_response_appearance('reset', Adw.ResponseAppearance.DESTRUCTIVE);
+    dialog.set_default_response('cancel');
+    dialog.set_close_response('cancel');
+
+    dialog.connect('response', (_d, response) => {
+      if (response !== 'reset') return;
+      try {
+        settings.delay();
+        for (const key of settings.settings_schema.list_keys())
+          settings.reset(key);
+        settings.apply();
+        this._toast(window, 'All settings reset to defaults');
+      } catch (e) {
+        try { settings.revert(); } catch (_) { }
+        this._toast(window, `Reset failed: ${e.message ?? e}`);
+      }
+    });
+
+    dialog.present(window);
   }
 
   // --- 便利メソッド群 ---
