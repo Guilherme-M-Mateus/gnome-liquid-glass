@@ -19,6 +19,7 @@ uniform float max_z;
 uniform float displacement_scale;
 uniform float edge_smoothing;
 uniform float profile_shape_n;
+uniform float bezel_width;   // px over which the glass rises; flat beyond it
 uniform float ior;
 uniform float chroma_strength;
 uniform float tint_strength;
@@ -66,7 +67,8 @@ float getHeight(vec2 p, vec2 b, float r, float zScale)
     float smoothZone = max(edge_smoothing, 1.0);
     if (d > smoothZone)
         return 0.0;
-    float maxDepth = max(-sdRoundRect(vec2(0.0), b, r), 1.0);
+    // A bezel of bezel_width px, capped at a full dome for thin shapes like pill panels.
+    float maxDepth = max(min(bezel_width, -sdRoundRect(vec2(0.0), b, r)), 1.0);
     float t = clamp(max(-d, 0.0) / maxDepth, 0.0, 1.0);
     float fade = 1.0 - smoothstep(-smoothZone, smoothZone, d);
     return profileHeight(t, zScale) * fade;
@@ -169,7 +171,9 @@ void main()
 
     float edgeBand = 1.0 - smoothstep(0.0, rim_width, abs(d));
     float rimFresnel = pow(max(1.0 - max(dot(normal, viewDir), 0.0), 0.0), max(rim_power, 0.001));
-    float lightMask = pow(abs(dot(normal, lightDir)), max(rim_directional_power, 1.0));
+    // Full highlight on the edge facing the light, a faint one opposite; no all-round outline.
+    float facing = dot(normal.xy, lightDir.xy) / max(length(normal.xy) * length(lightDir.xy), 1e-4);
+    float lightMask = pow(max(facing, 0.0), max(rim_directional_power, 1.0)) + 0.25 * pow(max(-facing, 0.0), max(rim_directional_power, 1.0));
     float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55);
     float rimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
 

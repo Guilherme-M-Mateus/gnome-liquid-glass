@@ -39,9 +39,11 @@ It is a fork of KWin's built-in **Blur** effect. Every surface that asks KWin fo
 already gets the glass, with no per-app setup: panels, popups, notifications, OSDs,
 KRunner, and translucent apps and decorations. KWin's background capture and dual-Kawase
 blur are kept as they are. The final composite pass (`src/shaders/glass.frag`) is the
-Three.js prototype's shader, ported to KWin: one superellipse dome over the whole shape,
-Snell refraction, chromatic aberration, and additive rim, specular and sheen lighting.
-Its defaults match the prototype too, so the edges catch light instead of darkening.
+Three.js prototype's shader, ported to KWin: a superellipse bezel that bends the
+background near the edges, Snell refraction, chromatic aberration, and additive rim,
+specular and sheen lighting. The highlight sits on the edge facing the light, with a faint
+one opposite, instead of an outline all the way round. The defaults give a frosted body
+with a clearly refracting bezel.
 
 It is a replacement for Blur, so turn Blur off when you turn this on.
 
@@ -96,7 +98,7 @@ To uninstall, turn Blur back on, switch the Plasma Style back to Breeze, and del
 ## Settings
 
 There is no settings UI yet. All settings go in `kwinrc` under `[Effect-liquidglass]`. The
-defaults match the Three.js prototype's defaults. For example:
+defaults are tuned for the frosted look in the screenshots. For example:
 
 ```bash
 kwriteconfig6 --file kwinrc --group Effect-liquidglass --key CornerRadius 20
@@ -105,22 +107,23 @@ qdbus6 org.kde.KWin /KWin reconfigure
 
 | Key | Default | |
 |---|---|---|
-| BlurStrength | 3 | 1–15, same scale as KWin Blur |
+| BlurStrength | 8 | 1–15, same scale as KWin Blur |
 | CornerRadius | 26 | px, for popups, notifications and OSDs; a window's own rounded corners win if it has them |
 | PillPanels | true | draw panels and docks as capsules (radius = half their thickness) |
 | TintColor | #ffffff | |
-| TintStrength | 0.04 | |
+| TintStrength | 0.22 | |
 | MaxZ | 16 | glass thickness |
-| DisplacementScale | 78.5 | refraction strength |
+| DisplacementScale | 200 | refraction strength |
+| BezelWidth | 28 | px over which the glass curves; flat beyond it |
 | IOR | 2.4 | |
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
-| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2.5 / 1.36 / 8 / 1.7 / 2.5 | |
+| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 1.0 / 8 / 1.7 / 2.5 | |
 | SpecularIntensity / Shininess | 0 / 42 | |
-| SheenIntensity | 0.32 | |
+| SheenIntensity | 0.1 | |
 | LightAngle | 120 | degrees, counter-clockwise from the right (120 = upper left) |
-| Brightness / Contrast / Saturation | 1 / 1 / 1 | |
+| Brightness / Contrast / Saturation | 1.05 / 1 / 1.4 | |
 
 ## Not ported (yet)
 
