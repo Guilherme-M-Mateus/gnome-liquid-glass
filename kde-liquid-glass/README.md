@@ -1,7 +1,8 @@
 # Liquid Glass for KDE Plasma 6
 
 A KWin effect that brings the liquid glass shader from the GNOME extension to Plasma,
-plus a matching Plasma Style that makes panels and popups see-through so the glass shows.
+plus a frameless Plasma Style, so the glass itself is the shape: pill-shaped panels and docks,
+and popups with 26px rounded corners.
 
 ### Demo
 
@@ -69,9 +70,12 @@ qdbus6 org.kde.KWin /KWin reconfigure
 
 You can also toggle it in *System Settings → Desktop Effects → Liquid Glass*.
 
-Then install the **Liquid Glass Plasma Style**. Breeze's panel and popup backgrounds are
-about 85% opaque and have a darker 1px outline, which hide most of the glass. This style
-is Breeze with the backgrounds and the outline at 18%, and it turns off the background-contrast pass that would darken the glass.
+Then install the **Liquid Glass Plasma Style**. Breeze draws its own panel and popup
+frames with small corners baked into its SVGs, which hide the glass. This style replaces
+those two frames with invisible ones that have square blur masks, so the only visible
+shape is the glass the effect draws: panels and docks as pills, popups with
+`CornerRadius` corners. It also turns off the background-contrast pass that would darken
+the glass.
 Everything else falls back to Breeze.
 
 ```bash
@@ -102,7 +106,8 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | Key | Default | |
 |---|---|---|
 | BlurStrength | 3 | 1–15, same scale as KWin Blur |
-| CornerRadius | 12 | px; a window's own rounded corners win if it has them |
+| CornerRadius | 26 | px, for popups, notifications and OSDs; a window's own rounded corners win if it has them |
+| PillPanels | true | draw panels and docks as capsules (radius = half their thickness) |
 | TintColor | #ffffff | |
 | TintStrength | 0.04 | |
 | MaxZ | 16 | glass thickness |

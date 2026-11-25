@@ -225,7 +225,8 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
     m_iterationCount = blurStrengthValues[blurStrength].iteration;
     m_offset = blurStrengthValues[blurStrength].offset;
     m_expandSize = blurOffsets[m_iterationCount - 1].expandSize;
-    m_cornerRadius = conf.readEntry("CornerRadius", 12.0);
+    m_cornerRadius = conf.readEntry("CornerRadius", 26.0);
+    m_pillPanels = conf.readEntry("PillPanels", true);
     const QColor tint(conf.readEntry("TintColor", QStringLiteral("#ffffff")));
     m_tint = QVector3D(tint.redF(), tint.greenF(), tint.blueF());
 
@@ -729,7 +730,10 @@ void LiquidGlassEffect::blur(const RenderTarget &renderTarget, const RenderViewp
         // popups that is the visible background, not the (larger) window.
         const RectF outputRect = viewport.renderRect();
         float cornerRadius = m_cornerRadius;
-        if (const BorderRadius radius = w->window()->borderRadius(); !radius.isNull()) {
+        if (w->isDock() && m_pillPanels) {
+            // Panels and docks are capsules; the shader clamps the radius to half the short side.
+            cornerRadius = std::min(backgroundRect.width(), backgroundRect.height()) * 0.5;
+        } else if (const BorderRadius radius = w->window()->borderRadius(); !radius.isNull()) {
             cornerRadius = radius.topLeft();
         }
 
