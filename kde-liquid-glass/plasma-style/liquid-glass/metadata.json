@@ -1,0 +1,11 @@
+{
+    "KPlugin": {
+        "Description": "Breeze with see-through panels and popups, for the Liquid Glass KWin effect",
+        "EnabledByDefault": true,
+        "Id": "liquid-glass",
+        "License": "LGPL",
+        "Name": "Liquid Glass",
+        "Version": "1.0.0"
+    },
+    "X-Plasma-API": "5.0"
+}

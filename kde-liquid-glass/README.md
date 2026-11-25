@@ -1,8 +1,36 @@
 # Liquid Glass for KDE Plasma 6
 
-A KWin effect that brings the liquid glass shader from the GNOME extension to Plasma.
+A KWin effect that brings the liquid glass shader from the GNOME extension to Plasma,
+plus a matching Plasma Style that makes panels and popups see-through so the glass shows.
 
-![KDE demo](../assets/kde-demo.png)
+### Demo
+
+Overview:
+
+![Overview](../assets/kde/overview.png)
+
+Dock (floating panel with Icons-only Task Manager):
+
+![Dock](../assets/kde/dock.png)
+
+Notifications:
+
+![Notification](../assets/kde/notification.png)
+
+Panel popups (Digital Clock):
+
+![Calendar popup](../assets/kde/calendar.png)
+
+System Tray (the Plasma counterpart of Quick Settings):
+
+![System Tray](../assets/kde/system-tray.png)
+
+OSD:
+
+![Volume OSD](../assets/kde/osd.png)
+
+All six are real screenshots: Plasma 6.8.3 with the Breeze Dark colours, the "Next"
+wallpaper, and this effect and Plasma Style at their default settings.
 
 ## How it works
 
@@ -40,8 +68,25 @@ qdbus6 org.kde.KWin /KWin reconfigure
 
 You can also toggle it in *System Settings → Desktop Effects → Liquid Glass*.
 
-To uninstall, turn Blur back on, then delete
-`/usr/lib/qt6/plugins/kwin/effects/plugins/liquidglass.so`.
+Then install the **Liquid Glass Plasma Style**. Breeze's panel and popup backgrounds are
+about 85% opaque and hide most of the glass. This style is Breeze with those backgrounds
+at 18%, and it turns off the background-contrast pass that would darken the glass.
+Everything else falls back to Breeze.
+
+```bash
+mkdir -p ~/.local/share/plasma/desktoptheme
+cp -r plasma-style/liquid-glass ~/.local/share/plasma/desktoptheme/
+plasma-apply-desktoptheme liquid-glass
+```
+
+The style works with both Breeze and Breeze Dark colours. To get the layout in the
+screenshots, use a floating top panel (Application Launcher, spacer, Digital Clock, spacer,
+System Tray) and a floating bottom panel set to *Fit content* with the *Icons-only Task
+Manager*.
+
+To uninstall, turn Blur back on, switch the Plasma Style back to Breeze, and delete
+`/usr/lib/qt6/plugins/kwin/effects/plugins/liquidglass.so` and
+`~/.local/share/plasma/desktoptheme/liquid-glass`.
 
 ## Settings
 
