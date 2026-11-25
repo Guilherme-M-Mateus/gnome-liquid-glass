@@ -102,10 +102,10 @@ LiquidGlassEffect::LiquidGlassEffect()
     // Defaults: the Three.js prototype's lighting, with a frosted body and a refractive bezel.
     m_params = {
         {"MaxZ", "max_z", 10.0},
-        {"DisplacementScale", "displacement_scale", 90.0},
+        {"DisplacementScale", "displacement_scale", 200.0},
         {"EdgeSmoothing", "edge_smoothing", 2.4},
         {"ProfileShapeN", "profile_shape_n", 3.4},
-        {"BezelWidth", "bezel_width", 16.0},
+        {"BezelWidth", "bezel_width", 24.0},
         {"IOR", "ior", 2.40},
         {"ChromaStrength", "chroma_strength", 0.006},
         {"TintStrength", "tint_strength", 0.22},
@@ -121,7 +121,7 @@ LiquidGlassEffect::LiquidGlassEffect()
         {"Brightness", "brightness", 1.05},
         {"Contrast", "contrast", 1.0},
         {"Saturation", "saturation", 1.4},
-        {"EdgeClarity", "edge_clarity", 0.35},
+        {"EdgeClarity", "edge_clarity", 0.6},
         {"EdgeShading", "edge_shading", 0.08},
     };
     for (FloatParam &param : m_params) {

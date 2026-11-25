@@ -115,14 +115,14 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | TintColor | #ffffff | |
 | TintStrength | 0.22 | |
 | MaxZ | 10 | glass thickness |
-| DisplacementScale | 90 | refraction strength |
-| BezelWidth | 16 | px over which the glass curves; flat beyond it |
+| DisplacementScale | 200 | refraction strength |
+| BezelWidth | 24 | px over which the glass curves; flat beyond it |
 | IOR | 2.4 | |
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
 | RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 0.6 / 8 / 1.7 / 2.5 | |
-| EdgeClarity | 0.35 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
+| EdgeClarity | 0.6 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
 | EdgeShading | 0.08 | 0–1, light/dark shading across the bezel from its curvature |
 | SpecularIntensity / Shininess | 0 / 42 | |
 | SheenIntensity | 0.1 | |
