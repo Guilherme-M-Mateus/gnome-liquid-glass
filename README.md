@@ -34,6 +34,10 @@ OSD:
 ![OSD Screenshot](assets/demo6.png)
 
 
+## KDE Plasma 6 version
+
+A KWin effect port lives in [`kde-liquid-glass/`](kde-liquid-glass/README.md). It applies the same shader to everything Plasma blurs (panels, popups, notifications, OSDs).
+
 ## Installation (GNOME Extension)
 
 ### Option 1: Quick Install (Terminal)
