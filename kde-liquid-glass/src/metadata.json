@@ -8,7 +8,6 @@
         "Category": "Appearance",
         "Description": "Liquid glass refraction behind panels, popups, notifications and OSDs. Replaces the Blur effect: disable Blur when enabling this.",
         "EnabledByDefault": false,
-        "Id": "liquidglass",
         "License": "GPL",
         "Name": "Liquid Glass",
         "Version": "1.0.0",
