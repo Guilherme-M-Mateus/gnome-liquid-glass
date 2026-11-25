@@ -1,8 +1,8 @@
 #version 140
 // Liquid glass composite pass for KWin.
-// Port of liquid-glass@thinkingcoding1231.gmail.com/shaders/glass.frag (GNOME):
-// same superellipse height profile, Snell refraction, chromatic aberration,
-// rim / specular / sheen lighting and inner AO. The drop shadow is dropped:
+// Port of the Three.js prototype (prototypes/sandbox-threejs/src/shaders/glass.frag):
+// one superellipse dome over the whole shape, Snell refraction, chromatic
+// aberration and additive rim / specular / sheen lighting. The drop shadow is dropped:
 // KWin only lets us paint inside the blur region, and Plasma themes draw their
 // own shadows anyway.
 
@@ -31,8 +31,6 @@ uniform float rim_power;
 uniform float rim_light_color_intensity;
 uniform float sheen_intensity;
 uniform float shininess;
-uniform float ao_intensity;
-uniform float ao_radius;
 uniform float light_angle_deg;
 uniform float brightness;
 uniform float contrast;
@@ -68,7 +66,8 @@ float getHeight(vec2 p, vec2 b, float r, float zScale)
     float smoothZone = max(edge_smoothing, 1.0);
     if (d > smoothZone)
         return 0.0;
-    float t = clamp(max(-d, 0.0) / max(r, 1.0), 0.0, 1.0);
+    float maxDepth = max(-sdRoundRect(vec2(0.0), b, r), 1.0);
+    float t = clamp(max(-d, 0.0) / maxDepth, 0.0, 1.0);
     float fade = 1.0 - smoothstep(-smoothZone, smoothZone, d);
     return profileHeight(t, zScale) * fade;
 }
@@ -163,17 +162,15 @@ void main()
     }
 
     vec3 baseColor = mix(applySCB(refracted, brightness, contrast, saturation), tint, tint_strength);
-    float aoMask = 1.0 - smoothstep(0.0, max(ao_radius, 0.001), -d);
-    baseColor *= 1.0 - aoMask * ao_intensity;
 
     float lightAngleRad = radians(light_angle_deg);
-    vec3 lightDir = normalize(vec3(cos(lightAngleRad), sin(lightAngleRad), 0.38));
+    vec3 lightDir = normalize(vec3(cos(lightAngleRad), -sin(lightAngleRad), 0.38)); // y up, as in the prototype
     vec3 viewDir = vec3(0.0, 0.0, 1.0);
 
     float edgeBand = 1.0 - smoothstep(0.0, rim_width, abs(d));
     float rimFresnel = pow(max(1.0 - max(dot(normal, viewDir), 0.0), 0.0), max(rim_power, 0.001));
     float lightMask = pow(abs(dot(normal, lightDir)), max(rim_directional_power, 1.0));
-    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55) * edgeBand;
+    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55);
     float rimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
 
     float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), max(shininess, 1.0)) * specular_intensity;
@@ -181,12 +178,8 @@ void main()
 
     float sheen = pow(max(dot(normal, lightDir), 0.0), 1.65) * mix(1.0, 0.55, edgeBand) * sheen_intensity;
 
-    vec3 added = vec3(specular + rimLight + edgeBand * 0.008 + sheen);
-    vec3 lit = baseColor + added - baseColor * added; // screen blend
-    float maxChannel = max(lit.r, max(lit.g, lit.b));
-    if (maxChannel > 1.0)
-        lit /= maxChannel;
+    vec3 lit = clamp(baseColor + vec3(specular + rimLight + edgeBand * 0.008 + sheen), 0.0, 1.0);
 
     // Premultiplied output.
-    fragColor = vec4(max(lit, 0.0) * insideMask, insideMask) * opacity;
+    fragColor = vec4(lit * insideMask, insideMask) * opacity;
 }

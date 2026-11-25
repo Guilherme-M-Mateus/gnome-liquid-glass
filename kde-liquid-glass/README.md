@@ -37,9 +37,10 @@ wallpaper, and this effect and Plasma Style at their default settings.
 It is a fork of KWin's built-in **Blur** effect. Every surface that asks KWin for blur
 already gets the glass, with no per-app setup: panels, popups, notifications, OSDs,
 KRunner, and translucent apps and decorations. KWin's background capture and dual-Kawase
-blur are kept as they are. The final composite pass is the GNOME shader
-(`src/shaders/glass.frag`), ported to KWin: superellipse height profile, Snell
-refraction, chromatic aberration, rim, specular and sheen lighting, and inner AO.
+blur are kept as they are. The final composite pass (`src/shaders/glass.frag`) is the
+Three.js prototype's shader, ported to KWin: one superellipse dome over the whole shape,
+Snell refraction, chromatic aberration, and additive rim, specular and sheen lighting.
+Its defaults match the prototype too, so the edges catch light instead of darkening.
 
 It is a replacement for Blur, so turn Blur off when you turn this on.
 
@@ -69,8 +70,8 @@ qdbus6 org.kde.KWin /KWin reconfigure
 You can also toggle it in *System Settings → Desktop Effects → Liquid Glass*.
 
 Then install the **Liquid Glass Plasma Style**. Breeze's panel and popup backgrounds are
-about 85% opaque and hide most of the glass. This style is Breeze with those backgrounds
-at 18%, and it turns off the background-contrast pass that would darken the glass.
+about 85% opaque and have a darker 1px outline, which hide most of the glass. This style
+is Breeze with the backgrounds and the outline at 18%, and it turns off the background-contrast pass that would darken the glass.
 Everything else falls back to Breeze.
 
 ```bash
@@ -91,7 +92,7 @@ To uninstall, turn Blur back on, switch the Plasma Style back to Breeze, and del
 ## Settings
 
 There is no settings UI yet. All settings go in `kwinrc` under `[Effect-liquidglass]`. The
-defaults match the GNOME extension's defaults. For example:
+defaults match the Three.js prototype's defaults. For example:
 
 ```bash
 kwriteconfig6 --file kwinrc --group Effect-liquidglass --key CornerRadius 20
@@ -100,21 +101,20 @@ qdbus6 org.kde.KWin /KWin reconfigure
 
 | Key | Default | |
 |---|---|---|
-| BlurStrength | 5 | 1–15, same scale as KWin Blur |
+| BlurStrength | 3 | 1–15, same scale as KWin Blur |
 | CornerRadius | 12 | px; a window's own rounded corners win if it has them |
 | TintColor | #ffffff | |
-| TintStrength | 0.12 | |
-| MaxZ | 25 | glass thickness |
+| TintStrength | 0.04 | |
+| MaxZ | 16 | glass thickness |
 | DisplacementScale | 78.5 | refraction strength |
 | IOR | 2.4 | |
-| ProfileShapeN | 7 | edge curvature (superellipse n) |
-| EdgeSmoothing | 2 | |
+| ProfileShapeN | 3.4 | dome curvature (superellipse n) |
+| EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
-| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 5 / 0.6 / 6 / 2.7 / 1.4 | |
+| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2.5 / 1.36 / 8 / 1.7 / 2.5 | |
 | SpecularIntensity / Shininess | 0 / 42 | |
 | SheenIntensity | 0.32 | |
-| AOIntensity / AORadius | 0.25 / 7.5 | |
-| LightAngle | 50 | degrees |
+| LightAngle | 120 | degrees, counter-clockwise from the right (120 = upper left) |
 | Brightness / Contrast / Saturation | 1 / 1 / 1 | |
 
 ## Not ported (yet)

@@ -98,26 +98,24 @@ LiquidGlassEffect::LiquidGlassEffect()
     m_glassPass.cornerRadiusLocation = m_glassPass.shader->uniformLocation("corner_radius");
     m_glassPass.tintLocation = m_glassPass.shader->uniformLocation("tint");
 
-    // Defaults are the GNOME extension's gschema defaults.
+    // Defaults are the Three.js prototype's (prototypes/sandbox-threejs/src/main.js).
     m_params = {
-        {"MaxZ", "max_z", 25.0},
+        {"MaxZ", "max_z", 16.0},
         {"DisplacementScale", "displacement_scale", 78.5},
-        {"EdgeSmoothing", "edge_smoothing", 2.0},
-        {"ProfileShapeN", "profile_shape_n", 7.0},
+        {"EdgeSmoothing", "edge_smoothing", 2.4},
+        {"ProfileShapeN", "profile_shape_n", 3.4},
         {"IOR", "ior", 2.40},
         {"ChromaStrength", "chroma_strength", 0.006},
-        {"TintStrength", "tint_strength", 0.12},
+        {"TintStrength", "tint_strength", 0.04},
         {"SpecularIntensity", "specular_intensity", 0.0},
         {"Shininess", "shininess", 42.0},
-        {"RimWidth", "rim_width", 5.0},
-        {"RimIntensity", "rim_intensity", 0.6},
-        {"RimDirectionalPower", "rim_directional_power", 2.7},
-        {"RimPower", "rim_power", 6.0},
-        {"RimLightColorIntensity", "rim_light_color_intensity", 1.4},
+        {"RimWidth", "rim_width", 2.5},
+        {"RimIntensity", "rim_intensity", 1.36},
+        {"RimDirectionalPower", "rim_directional_power", 1.7},
+        {"RimPower", "rim_power", 8.0},
+        {"RimLightColorIntensity", "rim_light_color_intensity", 2.5},
         {"SheenIntensity", "sheen_intensity", 0.32},
-        {"AOIntensity", "ao_intensity", 0.25},
-        {"AORadius", "ao_radius", 7.5},
-        {"LightAngle", "light_angle_deg", 50.0},
+        {"LightAngle", "light_angle_deg", 120.0},
         {"Brightness", "brightness", 1.0},
         {"Contrast", "contrast", 1.0},
         {"Saturation", "saturation", 1.0},
@@ -223,7 +221,7 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
 {
     const KConfigGroup conf = effects->config()->group(QStringLiteral("Effect-liquidglass"));
 
-    const int blurStrength = std::clamp(conf.readEntry("BlurStrength", 5), 1, int(blurStrengthValues.size())) - 1;
+    const int blurStrength = std::clamp(conf.readEntry("BlurStrength", 3), 1, int(blurStrengthValues.size())) - 1;
     m_iterationCount = blurStrengthValues[blurStrength].iteration;
     m_offset = blurStrengthValues[blurStrength].offset;
     m_expandSize = blurOffsets[m_iterationCount - 1].expandSize;
