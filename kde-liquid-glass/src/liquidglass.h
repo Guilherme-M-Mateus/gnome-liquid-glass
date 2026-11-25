@@ -109,6 +109,7 @@ private:
         int opacityLocation;
         int cornerRadiusLocation;
         int tintLocation;
+        int sharpLocation;
     } m_glassPass;
 
     /// Scalar shader uniforms read straight from kwinrc [Effect-liquidglass]: {config key, uniform, default}.

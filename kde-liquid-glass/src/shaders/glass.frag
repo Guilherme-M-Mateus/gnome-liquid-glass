@@ -1,12 +1,13 @@
 #version 140
 // Liquid glass composite pass for KWin.
 // Port of the Three.js prototype (prototypes/sandbox-threejs/src/shaders/glass.frag):
-// one superellipse dome over the whole shape, Snell refraction, chromatic
+// a superellipse bezel (lens-sharp, shaded by its curvature) around a frosted body, Snell refraction, chromatic
 // aberration and additive rim / specular / sheen lighting. The drop shadow is dropped:
 // KWin only lets us paint inside the blur region, and Plasma themes draw their
 // own shadows anyway.
 
 uniform sampler2D texUnit;   // dual-Kawase blurred background behind the glass
+uniform sampler2D sharpUnit; // the same background, unblurred
 
 uniform vec2 resolution;     // size of the captured background, logical px
 uniform vec2 refResolution;  // output size; optical constants are tuned against it
@@ -36,15 +37,20 @@ uniform float light_angle_deg;
 uniform float brightness;
 uniform float contrast;
 uniform float saturation;
+uniform float edge_clarity;  // 0..1: how much the bezel shows the unblurred, lensed background
+uniform float edge_shading;  // 0..1: light/dark shading across the bezel from its curvature
 
 in vec2 uv;
 out vec4 fragColor;
 
 // KWin texcoords have v=1 at the top; the math below uses a top-left origin
 // like Cogl, so flip once on the way in and once per texture fetch.
+float g_lens = 0.0; // blurred -> sharp mix for the current fragment
+
 vec3 fetch(vec2 st)
 {
-    return texture(texUnit, vec2(st.x, 1.0 - st.y)).rgb;
+    vec2 t = vec2(st.x, 1.0 - st.y);
+    return mix(texture(texUnit, t).rgb, texture(sharpUnit, t).rgb, g_lens);
 }
 
 float sdRoundRect(vec2 p, vec2 b, float r)
@@ -133,6 +139,8 @@ void main()
     }
 
     vec3 normal = normalize(vec3(-heightGradient(local_pos, boxHalfSize, r, max_z, refResolution), 1.0));
+    // Real glass edges act as a lens: crisp and warped in the bezel, frosted in the flat middle.
+    g_lens = edge_clarity * (1.0 - smoothstep(0.0, max(bezel_width, 1.0), -d));
     float edgeDampen = smoothstep(0.0, edgeFeather * 3.0, -d);
     vec2 disp = getDisplacementPx(d, normal) * edgeDampen / resolution;
     vec2 refractedUv = stabilizedUV(st + disp, st);
@@ -169,12 +177,16 @@ void main()
     vec3 lightDir = normalize(vec3(cos(lightAngleRad), -sin(lightAngleRad), 0.38)); // y up, as in the prototype
     vec3 viewDir = vec3(0.0, 0.0, 1.0);
 
+    // Curvature shading: the bezel's slope toward the light is lighter, away from it darker.
+    float facing = dot(normal.xy, lightDir.xy) / max(length(normal.xy) * length(lightDir.xy), 1e-4);
+    float tilt = clamp(length(normal.xy) * 2.0, 0.0, 1.0);
+    baseColor *= 1.0 + edge_shading * facing * tilt;
+
     float edgeBand = 1.0 - smoothstep(0.0, rim_width, abs(d));
     float rimFresnel = pow(max(1.0 - max(dot(normal, viewDir), 0.0), 0.0), max(rim_power, 0.001));
     // Full highlight on the edge facing the light, a faint one opposite; no all-round outline.
-    float facing = dot(normal.xy, lightDir.xy) / max(length(normal.xy) * length(lightDir.xy), 1e-4);
     float lightMask = pow(max(facing, 0.0), max(rim_directional_power, 1.0)) + 0.25 * pow(max(-facing, 0.0), max(rim_directional_power, 1.0));
-    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55);
+    float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55) * edgeBand; // a thin line, not the whole bezel
     float rimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
 
     float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), max(shininess, 1.0)) * specular_intensity;

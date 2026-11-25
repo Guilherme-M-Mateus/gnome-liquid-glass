@@ -97,6 +97,7 @@ LiquidGlassEffect::LiquidGlassEffect()
     m_glassPass.opacityLocation = m_glassPass.shader->uniformLocation("opacity");
     m_glassPass.cornerRadiusLocation = m_glassPass.shader->uniformLocation("corner_radius");
     m_glassPass.tintLocation = m_glassPass.shader->uniformLocation("tint");
+    m_glassPass.sharpLocation = m_glassPass.shader->uniformLocation("sharpUnit");
 
     // Defaults: the Three.js prototype's lighting, with a frosted body and a refractive bezel.
     m_params = {
@@ -111,7 +112,7 @@ LiquidGlassEffect::LiquidGlassEffect()
         {"SpecularIntensity", "specular_intensity", 0.0},
         {"Shininess", "shininess", 42.0},
         {"RimWidth", "rim_width", 2.0},
-        {"RimIntensity", "rim_intensity", 1.0},
+        {"RimIntensity", "rim_intensity", 0.6},
         {"RimDirectionalPower", "rim_directional_power", 1.7},
         {"RimPower", "rim_power", 8.0},
         {"RimLightColorIntensity", "rim_light_color_intensity", 2.5},
@@ -120,6 +121,8 @@ LiquidGlassEffect::LiquidGlassEffect()
         {"Brightness", "brightness", 1.05},
         {"Contrast", "contrast", 1.0},
         {"Saturation", "saturation", 1.4},
+        {"EdgeClarity", "edge_clarity", 0.75},
+        {"EdgeShading", "edge_shading", 0.35},
     };
     for (FloatParam &param : m_params) {
         param.location = m_glassPass.shader->uniformLocation(param.uniform);
@@ -751,12 +754,21 @@ void LiquidGlassEffect::blur(const RenderTarget &renderTarget, const RenderViewp
             shader->setUniform(param.location, param.value);
         }
 
+        // Unit 1: the unblurred background (textures[0]), sampled sharp in the bezel.
+        shader->setUniform(m_glassPass.sharpLocation, 1);
+        glActiveTexture(GL_TEXTURE1);
+        renderInfo.textures[0]->bind();
+        glActiveTexture(GL_TEXTURE0);
         read->colorAttachment()->bind();
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         vbo->draw(GL_TRIANGLES, 6, vertexCount);
         glDisable(GL_BLEND);
+
+        glActiveTexture(GL_TEXTURE1);
+        renderInfo.textures[0]->unbind();
+        glActiveTexture(GL_TEXTURE0);
 
         ShaderManager::instance()->popShader();
     }

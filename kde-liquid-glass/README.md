@@ -41,7 +41,9 @@ KRunner, and translucent apps and decorations. KWin's background capture and dua
 blur are kept as they are. The final composite pass (`src/shaders/glass.frag`) is the
 Three.js prototype's shader, ported to KWin: a superellipse bezel that bends the
 background near the edges, Snell refraction, chromatic aberration, and additive rim,
-specular and sheen lighting. The highlight sits on the edge facing the light, with a faint
+specular and sheen lighting. The bezel samples the unblurred background, so it acts as a
+crisp lens around the frosted middle, and is shaded by its own curvature: lighter on the
+side facing the light, slightly darker on the side away from it. The highlight sits on the edge facing the light, with a faint
 one opposite, instead of an outline all the way round. The defaults give a frosted body
 with a clearly refracting bezel.
 
@@ -119,7 +121,9 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
-| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 1.0 / 8 / 1.7 / 2.5 | |
+| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 0.6 / 8 / 1.7 / 2.5 | |
+| EdgeClarity | 0.75 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
+| EdgeShading | 0.35 | 0–1, light/dark shading across the bezel from its curvature |
 | SpecularIntensity / Shininess | 0 / 42 | |
 | SheenIntensity | 0.1 | |
 | LightAngle | 120 | degrees, counter-clockwise from the right (120 = upper left) |
