@@ -122,8 +122,8 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
-| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 5 / 0.6 / 6 / 1.7 / 2.5 | |
-| RimEvenness | 0.5 | 0 = rim only on the lit edge, 1 = even all the way round |
+| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 10 / 0.22 / 6 / 1.7 / 2.5 | |
+| RimEvenness | 0 | 0 = rim only on the lit edge, 1 = even all the way round |
 | EdgeClarity | 0.6 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
 | EdgeShading | 0.08 | 0–1, light/dark shading across the bezel from its curvature |
 | SpecularIntensity / Shininess | 0 / 42 | |
