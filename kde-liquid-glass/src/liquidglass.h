@@ -125,6 +125,7 @@ private:
     float m_cornerRadius = 26.0;
     bool m_pillPanels = true;
     float m_notificationCornerRadius = 16.0;
+    float m_panelCornerRadius = 8.0;
     QVector3D m_tint{1, 1, 1};
 
     bool m_valid = false;

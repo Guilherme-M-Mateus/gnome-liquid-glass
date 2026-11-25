@@ -12,6 +12,7 @@
 
 #include "liquidglass.h"
 
+#include "core/output.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
@@ -233,6 +234,7 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
     m_cornerRadius = conf.readEntry("CornerRadius", 34.0);
     m_pillPanels = conf.readEntry("PillPanels", true);
     m_notificationCornerRadius = conf.readEntry("NotificationCornerRadius", 16.0);
+    m_panelCornerRadius = conf.readEntry("PanelCornerRadius", 8.0);
     const QColor tint(conf.readEntry("TintColor", QStringLiteral("#ffffff")));
     m_tint = QVector3D(tint.redF(), tint.greenF(), tint.blueF());
 
@@ -736,9 +738,18 @@ void LiquidGlassEffect::blur(const RenderTarget &renderTarget, const RenderViewp
         // popups that is the visible background, not the (larger) window.
         const RectF outputRect = viewport.renderRect();
         float cornerRadius = m_cornerRadius;
-        if (w->isDock() && m_pillPanels) {
-            // Panels and docks are capsules; the shader clamps the radius to half the short side.
-            cornerRadius = std::min(backgroundRect.width(), backgroundRect.height()) * 0.5;
+        if (w->isDock()) {
+            // Docks that fit their content are capsules; bars spanning (most of) the screen
+            // get small corners, since a screen-wide capsule just looks bloated.
+            const bool horizontal = backgroundRect.width() >= backgroundRect.height();
+            const Rect screen = w->screen() ? w->screen()->geometry() : Rect();
+            const double span = horizontal ? double(backgroundRect.width()) / std::max(screen.width(), 1)
+                                           : double(backgroundRect.height()) / std::max(screen.height(), 1);
+            if (m_pillPanels && span < 0.8) {
+                cornerRadius = std::min(backgroundRect.width(), backgroundRect.height()) * 0.5;
+            } else {
+                cornerRadius = m_panelCornerRadius;
+            }
         } else if (w->isNotification() || w->isCriticalNotification()) {
             // Plasma lays the notification header (and its close button) out to the popup's corner.
             cornerRadius = m_notificationCornerRadius;
