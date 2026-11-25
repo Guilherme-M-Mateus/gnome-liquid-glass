@@ -101,11 +101,11 @@ LiquidGlassEffect::LiquidGlassEffect()
 
     // Defaults: the Three.js prototype's lighting, with a frosted body and a refractive bezel.
     m_params = {
-        {"MaxZ", "max_z", 12.0},
-        {"DisplacementScale", "displacement_scale", 130.0},
+        {"MaxZ", "max_z", 10.0},
+        {"DisplacementScale", "displacement_scale", 90.0},
         {"EdgeSmoothing", "edge_smoothing", 2.4},
         {"ProfileShapeN", "profile_shape_n", 3.4},
-        {"BezelWidth", "bezel_width", 22.0},
+        {"BezelWidth", "bezel_width", 16.0},
         {"IOR", "ior", 2.40},
         {"ChromaStrength", "chroma_strength", 0.006},
         {"TintStrength", "tint_strength", 0.22},
@@ -121,8 +121,8 @@ LiquidGlassEffect::LiquidGlassEffect()
         {"Brightness", "brightness", 1.05},
         {"Contrast", "contrast", 1.0},
         {"Saturation", "saturation", 1.4},
-        {"EdgeClarity", "edge_clarity", 0.5},
-        {"EdgeShading", "edge_shading", 0.18},
+        {"EdgeClarity", "edge_clarity", 0.35},
+        {"EdgeShading", "edge_shading", 0.08},
     };
     for (FloatParam &param : m_params) {
         param.location = m_glassPass.shader->uniformLocation(param.uniform);
@@ -225,7 +225,7 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
 {
     const KConfigGroup conf = effects->config()->group(QStringLiteral("Effect-liquidglass"));
 
-    const int blurStrength = std::clamp(conf.readEntry("BlurStrength", 8), 1, int(blurStrengthValues.size())) - 1;
+    const int blurStrength = std::clamp(conf.readEntry("BlurStrength", 5), 1, int(blurStrengthValues.size())) - 1;
     m_iterationCount = blurStrengthValues[blurStrength].iteration;
     m_offset = blurStrengthValues[blurStrength].offset;
     m_expandSize = blurOffsets[m_iterationCount - 1].expandSize;
