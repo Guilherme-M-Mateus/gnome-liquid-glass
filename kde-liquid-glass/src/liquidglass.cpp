@@ -108,19 +108,20 @@ LiquidGlassEffect::LiquidGlassEffect()
         {"BezelWidth", "bezel_width", 24.0},
         {"IOR", "ior", 2.40},
         {"ChromaStrength", "chroma_strength", 0.006},
-        {"TintStrength", "tint_strength", 0.22},
+        {"TintStrength", "tint_strength", 0.15},
         {"SpecularIntensity", "specular_intensity", 0.0},
         {"Shininess", "shininess", 42.0},
-        {"RimWidth", "rim_width", 2.0},
+        {"RimWidth", "rim_width", 5.0},
         {"RimIntensity", "rim_intensity", 0.6},
         {"RimDirectionalPower", "rim_directional_power", 1.7},
-        {"RimPower", "rim_power", 8.0},
+        {"RimPower", "rim_power", 6.0},
+        {"RimEvenness", "rim_evenness", 0.5},
         {"RimLightColorIntensity", "rim_light_color_intensity", 2.5},
         {"SheenIntensity", "sheen_intensity", 0.1},
         {"LightAngle", "light_angle_deg", 120.0},
-        {"Brightness", "brightness", 1.05},
+        {"Brightness", "brightness", 1.0},
         {"Contrast", "contrast", 1.0},
-        {"Saturation", "saturation", 1.4},
+        {"Saturation", "saturation", 1.0},
         {"EdgeClarity", "edge_clarity", 0.6},
         {"EdgeShading", "edge_shading", 0.08},
     };
@@ -229,7 +230,7 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
     m_iterationCount = blurStrengthValues[blurStrength].iteration;
     m_offset = blurStrengthValues[blurStrength].offset;
     m_expandSize = blurOffsets[m_iterationCount - 1].expandSize;
-    m_cornerRadius = conf.readEntry("CornerRadius", 26.0);
+    m_cornerRadius = conf.readEntry("CornerRadius", 34.0);
     m_pillPanels = conf.readEntry("PillPanels", true);
     const QColor tint(conf.readEntry("TintColor", QStringLiteral("#ffffff")));
     m_tint = QVector3D(tint.redF(), tint.greenF(), tint.blueF());

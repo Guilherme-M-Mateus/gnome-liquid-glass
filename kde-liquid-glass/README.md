@@ -2,7 +2,7 @@
 
 A KWin effect that brings the liquid glass shader from the GNOME extension to Plasma,
 plus a frameless Plasma Style, so the glass itself is the shape: pill-shaped panels and docks,
-and popups with 26px rounded corners.
+and popups with 34px rounded corners.
 
 ### Demo
 
@@ -30,8 +30,9 @@ OSD:
 
 ![Volume OSD](../assets/kde/osd.png)
 
-All six are real screenshots: Plasma 6.8.3 with the Breeze Dark colours, the "Next"
-wallpaper, and this effect and Plasma Style at their default settings.
+All six are real screenshots: Plasma 6.8.3 with the Breeze Dark colours, a smooth
+gradient wallpaper (like the GNOME screenshots use), and this effect and Plasma Style at
+their default settings.
 
 ## How it works
 
@@ -110,10 +111,10 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | Key | Default | |
 |---|---|---|
 | BlurStrength | 5 | 1–15, same scale as KWin Blur |
-| CornerRadius | 26 | px, for popups, notifications and OSDs; a window's own rounded corners win if it has them |
+| CornerRadius | 34 | px, for popups, notifications and OSDs; a window's own rounded corners win if it has them |
 | PillPanels | true | draw panels and docks as capsules (radius = half their thickness) |
 | TintColor | #ffffff | |
-| TintStrength | 0.22 | |
+| TintStrength | 0.15 | |
 | MaxZ | 10 | glass thickness |
 | DisplacementScale | 200 | refraction strength |
 | BezelWidth | 24 | px over which the glass curves; flat beyond it |
@@ -121,13 +122,14 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
-| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 0.6 / 8 / 1.7 / 2.5 | |
+| RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 5 / 0.6 / 6 / 1.7 / 2.5 | |
+| RimEvenness | 0.5 | 0 = rim only on the lit edge, 1 = even all the way round |
 | EdgeClarity | 0.6 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
 | EdgeShading | 0.08 | 0–1, light/dark shading across the bezel from its curvature |
 | SpecularIntensity / Shininess | 0 / 42 | |
 | SheenIntensity | 0.1 | |
 | LightAngle | 120 | degrees, counter-clockwise from the right (120 = upper left) |
-| Brightness / Contrast / Saturation | 1.05 / 1 / 1.4 | |
+| Brightness / Contrast / Saturation | 1 / 1 / 1 | |
 
 ## Not ported (yet)
 

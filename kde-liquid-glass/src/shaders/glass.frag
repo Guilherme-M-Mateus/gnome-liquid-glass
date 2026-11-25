@@ -30,6 +30,7 @@ uniform float rim_width;
 uniform float rim_intensity;
 uniform float rim_directional_power;
 uniform float rim_power;
+uniform float rim_evenness;  // 0 = rim only where the light hits, 1 = the same all the way round
 uniform float rim_light_color_intensity;
 uniform float sheen_intensity;
 uniform float shininess;
@@ -186,6 +187,7 @@ void main()
     float rimFresnel = pow(max(1.0 - max(dot(normal, viewDir), 0.0), 0.0), max(rim_power, 0.001));
     // Full highlight on the edge facing the light, a faint one opposite; no all-round outline.
     float lightMask = pow(max(facing, 0.0), max(rim_directional_power, 1.0)) + 0.25 * pow(max(-facing, 0.0), max(rim_directional_power, 1.0));
+    lightMask = mix(lightMask, 1.0, rim_evenness);
     float rimShape = mix(pow(edgeBand, 0.85), rimFresnel, 0.55) * edgeBand; // a thin line, not the whole bezel
     float rimLight = rimShape * lightMask * rim_intensity * rim_light_color_intensity;
 
