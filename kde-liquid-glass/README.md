@@ -114,16 +114,16 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | PillPanels | true | draw panels and docks as capsules (radius = half their thickness) |
 | TintColor | #ffffff | |
 | TintStrength | 0.22 | |
-| MaxZ | 16 | glass thickness |
-| DisplacementScale | 200 | refraction strength |
-| BezelWidth | 28 | px over which the glass curves; flat beyond it |
+| MaxZ | 12 | glass thickness |
+| DisplacementScale | 130 | refraction strength |
+| BezelWidth | 22 | px over which the glass curves; flat beyond it |
 | IOR | 2.4 | |
 | ProfileShapeN | 3.4 | dome curvature (superellipse n) |
 | EdgeSmoothing | 2.4 | |
 | ChromaStrength | 0.006 | chromatic aberration |
 | RimWidth / RimIntensity / RimPower / RimDirectionalPower / RimLightColorIntensity | 2 / 0.6 / 8 / 1.7 / 2.5 | |
-| EdgeClarity | 0.75 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
-| EdgeShading | 0.35 | 0–1, light/dark shading across the bezel from its curvature |
+| EdgeClarity | 0.5 | 0–1, how sharp (unblurred) the lensed background is in the bezel |
+| EdgeShading | 0.18 | 0–1, light/dark shading across the bezel from its curvature |
 | SpecularIntensity / Shininess | 0 / 42 | |
 | SheenIntensity | 0.1 | |
 | LightAngle | 120 | degrees, counter-clockwise from the right (120 = upper left) |
