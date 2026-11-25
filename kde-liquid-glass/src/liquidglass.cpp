@@ -232,6 +232,7 @@ void LiquidGlassEffect::reconfigure(ReconfigureFlags)
     m_expandSize = blurOffsets[m_iterationCount - 1].expandSize;
     m_cornerRadius = conf.readEntry("CornerRadius", 34.0);
     m_pillPanels = conf.readEntry("PillPanels", true);
+    m_notificationCornerRadius = conf.readEntry("NotificationCornerRadius", 16.0);
     const QColor tint(conf.readEntry("TintColor", QStringLiteral("#ffffff")));
     m_tint = QVector3D(tint.redF(), tint.greenF(), tint.blueF());
 
@@ -738,6 +739,9 @@ void LiquidGlassEffect::blur(const RenderTarget &renderTarget, const RenderViewp
         if (w->isDock() && m_pillPanels) {
             // Panels and docks are capsules; the shader clamps the radius to half the short side.
             cornerRadius = std::min(backgroundRect.width(), backgroundRect.height()) * 0.5;
+        } else if (w->isNotification() || w->isCriticalNotification()) {
+            // Plasma lays the notification header (and its close button) out to the popup's corner.
+            cornerRadius = m_notificationCornerRadius;
         } else if (const BorderRadius radius = w->window()->borderRadius(); !radius.isNull()) {
             cornerRadius = radius.topLeft();
         }

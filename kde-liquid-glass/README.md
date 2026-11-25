@@ -111,7 +111,8 @@ qdbus6 org.kde.KWin /KWin reconfigure
 | Key | Default | |
 |---|---|---|
 | BlurStrength | 5 | 1–15, same scale as KWin Blur |
-| CornerRadius | 34 | px, for popups, notifications and OSDs; a window's own rounded corners win if it has them |
+| CornerRadius | 34 | px, for popups and OSDs; a window's own rounded corners win if it has them |
+| NotificationCornerRadius | 16 | px; smaller because Plasma puts the notification close button in the corner |
 | PillPanels | true | draw panels and docks as capsules (radius = half their thickness) |
 | TintColor | #ffffff | |
 | TintStrength | 0.15 | |
